@@ -64,6 +64,8 @@ const ICONS = {
   plus: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.3-2.6h-4l-.3 2.6a7 7 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z" stroke="currentColor" stroke-width="1.5"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8" stroke="currentColor" stroke-width="2"/></svg>',
+  user: '<svg viewBox="0 0 24 24" fill="none"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="7" r="4" stroke="currentColor" stroke-width="2"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3M15.5 7.5L14 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   eye: '<svg viewBox="0 0 24 24" fill="none"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="none"><path d="m12 3 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9 6.8 19.2l1-5.8L3.5 9.2l5.9-.9z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>',
@@ -351,7 +353,7 @@ function renderLocked({ overlay = false } = {}) {
   clearInterval(totpTimer);
   document.getElementById('okey-lock-overlay')?.remove();
   const useOverlay = overlay && app.childElementCount > 0;
-  const pw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Master password', autofocus: true });
+  const pw = h('input', { class: 'vs-input okey-lock-input', type: 'password', placeholder: 'Master password', autofocus: true });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Unlock' });
   const submit = async () => {
     if (!pw.value) return;
@@ -429,7 +431,6 @@ function renderMain() {
     h('div', { class: 'okey-search' }, h('span', { html: ICONS.search }), search),
     iconBtn(ICONS.plus, 'Add', () => renderEdit(null)),
     iconBtn(ICONS.gear, 'Settings', renderSettings),
-    iconBtn(ICONS.close, 'Close', () => window.close()), // feedback #2
   );
 
   const tabs = h('div', { class: 'okey-tabs' },
@@ -471,6 +472,7 @@ function renderList(body, query) {
 
   if (!entries.length) { body.append(h('div', { class: 'okey-empty', text: query ? 'No matches' : 'No items yet. Tap + to add one.' })); return; }
   entries.forEach((e) => body.append(entryRow(e)));
+  startGlobalTotpTicker();
 }
 
 function selectToolbar(body, query) {
@@ -480,26 +482,82 @@ function selectToolbar(body, query) {
   if (selectMode) {
     const del = h('button', { class: 'vs-btn vs-btn-danger vs-btn-sm', text: `Delete (${selected.size})`, disabled: !selected.size,
       onclick: async () => {
-        await vault.deleteEntries([...selected]);
+        if (confirm(`Are you sure you want to delete ${selected.size} selected item${selected.size === 1 ? '' : 's'}? This cannot be undone.`)) {
+          await vault.deleteEntries([...selected]);
+          selectMode = false; selected.clear();
+          toast('Deleted', 'success'); renderList(body, query); scheduleSync();
+        }
+      } });
+    const exp = h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: `Export (${selected.size})`, disabled: !selected.size,
+      onclick: () => {
+        const selectedEntries = [...selected].map(id => vault.getEntry(id)).filter(Boolean);
+        download('okey-selected-export.csv', IE.exportCsv(selectedEntries));
         selectMode = false; selected.clear();
-        toast('Deleted', 'success'); renderList(body, query); scheduleSync();
+        toast('Exported CSV', 'success'); renderList(body, query);
       } });
     row.insertBefore(del, row.firstChild);
+    row.insertBefore(exp, del.nextSibling);
   }
   return row;
+}
+
+function startGlobalTotpTicker() {
+  clearInterval(totpTimer);
+  async function tick() {
+    const containers = document.querySelectorAll('.okey-row-totp-container');
+    if (!containers.length) {
+      clearInterval(totpTimer);
+      return;
+    }
+    for (const container of containers) {
+      const secret = container.dataset.secret;
+      const codeSpan = container.querySelector('.okey-row-totp-code');
+      const bar = container.querySelector('.okey-row-totp-progress-bar');
+      if (!secret || !codeSpan) continue;
+      try {
+        const { code, remaining, period } = await generateTOTP(secret);
+        codeSpan.textContent = code.replace(/(\d{3})(\d{3})/, '$1 $2');
+        if (bar) {
+          const pct = (remaining / period) * 100;
+          bar.style.transform = `scaleX(${pct / 100})`;
+          if (remaining < 6) {
+            bar.style.background = 'var(--vs-danger)';
+            codeSpan.style.color = 'var(--vs-danger)';
+          } else {
+            bar.style.background = 'var(--vs-brand)';
+            codeSpan.style.color = 'var(--vs-brand)';
+          }
+        }
+      } catch {
+        codeSpan.textContent = 'ERROR';
+      }
+    }
+  }
+  tick();
+  totpTimer = setInterval(tick, 1000);
 }
 
 function entryRow(entry, confidence) {
   const sub = entry.username || getDisplayDomain(entry.domain) || (entry.entryType === ENTRY_TYPES.TOTP ? 'Authenticator' : '');
   const actions = h('div', { class: 'okey-entry-actions' });
-  if (entry.username) actions.append(iconBtn(ICONS.copy, 'Copy username', (ev) => { ev.stopPropagation(); copyValue(entry.username, 'Username copied'); }));
-  if (entry.id) actions.append(iconBtn(ICONS.copy, 'Copy item ID', (ev) => { ev.stopPropagation(); copyValue(entry.id, 'Item ID copied'); }));
-  if (entry.password) actions.append(iconBtn(ICONS.copy, 'Copy password', (ev) => { ev.stopPropagation(); copyValue(entry.password, 'Password copied'); }));
+  if (entry.username) actions.append(iconBtn(ICONS.user, 'Copy username', (ev) => { ev.stopPropagation(); copyValue(entry.username, 'Username copied'); }));
+  if (entry.password) actions.append(iconBtn(ICONS.key, 'Copy password', (ev) => { ev.stopPropagation(); copyValue(entry.password, 'Password copied'); }));
   if (entry.totpSecret) actions.append(iconBtn(ICONS.clock, 'Copy code', async (ev) => {
     ev.stopPropagation();
     const { code } = await generateTOTP(entry.totpSecret);
     copyValue(code, 'Code copied');
   })); // feedback #24
+
+  let totpEl = null;
+  if (entry.totpSecret) {
+    const codeSpan = h('span', { class: 'okey-row-totp-code vs-mono', text: '••••••' });
+    const progressBar = h('div', { class: 'okey-row-totp-progress-bar' });
+    const progressEl = h('div', { class: 'okey-row-totp-progress' }, progressBar);
+    totpEl = h('div', { class: 'okey-row-totp-container', attrs: { 'data-secret': entry.totpSecret }, onclick: (ev) => {
+      ev.stopPropagation();
+      copyValue(codeSpan.textContent.replace(/\s/g, ''), 'Code copied');
+    } }, codeSpan, progressEl);
+  }
 
   const row = h('div', { class: 'okey-entry' },
     selectMode ? h('input', { type: 'checkbox', class: 'okey-checkbox', checked: selected.has(entry.id),
@@ -508,6 +566,7 @@ function entryRow(entry, confidence) {
       h('div', { class: 'okey-entry-title' }, entry.nickname || entry.siteName || getDisplayDomain(entry.domain) || 'Untitled'),
       h('div', { class: 'okey-entry-sub' }, sub)),
     confidence ? h('span', { class: 'okey-confidence', text: confidence >= 95 ? 'EXACT' : 'MATCH' }) : null,
+    totpEl,
     actions,
   );
   row.addEventListener('click', () => { if (!selectMode) renderDetail(entry.id); });
@@ -540,7 +599,7 @@ function renderDetail(id) {
   if (entry.isFavorite) star.style.color = 'var(--vs-warning)';
 
   app.append(h('div', { class: 'okey-view' },
-    h('div', { class: 'okey-view-header' },
+    h('div', { class: 'okey-view-header vs-glass' },
       iconBtn(ICONS.back, 'Back', renderMain),
       avatarEl(entry),
       h('div', { class: 'okey-view-title', text: entry.nickname || entry.siteName || getDisplayDomain(entry.domain) }),
@@ -906,7 +965,7 @@ function brandHeader() {
     h('div', { class: 'vs-faint', style: 'margin-top:4px', text: 'One key to rule them all' }));
 }
 function iconBtn(svg, title, onclick) { return h('button', { class: 'vs-icon-btn', title, 'aria-label': title, html: svg, onclick }); }
-function viewHeader(title, back) { return h('div', { class: 'okey-view-header' }, iconBtn(ICONS.back, 'Back', back), h('div', { class: 'okey-view-title', text: title })); }
+function viewHeader(title, back) { return h('div', { class: 'okey-view-header vs-glass' }, iconBtn(ICONS.back, 'Back', back), h('div', { class: 'okey-view-title', text: title })); }
 function renderFooter() {
   const syncLabel = h('span', { class: 'vs-faint', text: 'Never synced' });
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {

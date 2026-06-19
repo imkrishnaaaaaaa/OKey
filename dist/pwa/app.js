@@ -33,9 +33,9 @@ var CRYPTO = Object.freeze({
   SALT_LENGTH: 32
 });
 var SECURITY = Object.freeze({
-  DEFAULT_AUTO_LOCK_MINUTES: 5,
-  MIN_AUTO_LOCK_MINUTES: 1,
-  MAX_AUTO_LOCK_MINUTES: 60,
+  DEFAULT_AUTO_LOCK_SECONDS: 60,
+  MIN_AUTO_LOCK_SECONDS: 30,
+  MAX_AUTO_LOCK_SECONDS: 1800,
   /** Re-open popup within this window → restore unlocked session without re-typing. */
   SESSION_REUNLOCK_COOLDOWN_MINUTES: 1,
   DEFAULT_CLIPBOARD_CLEAR_SECONDS: 30,
@@ -86,7 +86,7 @@ var FAVICON = Object.freeze({
   PROVIDER: "https://www.google.com/s2/favicons"
 });
 var DEFAULT_SETTINGS = Object.freeze({
-  autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_MINUTES,
+  autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -4905,11 +4905,11 @@ var pwaNetwork = {
 
 // src/pwa/lib/session.js
 var K = { DEK: "okey_session_dek", EXP: "okey_session_exp" };
-function cacheDek(dekBytes, autoLockMinutes) {
+function cacheDek(dekBytes, autoLockSeconds) {
   sessionStorage.setItem(K.DEK, bytesToBase64(dekBytes));
-  sessionStorage.setItem(K.EXP, String(Date.now() + autoLockMinutes * 6e4));
+  sessionStorage.setItem(K.EXP, String(Date.now() + autoLockSeconds * 1e3));
 }
-function getCachedDek(autoLockMinutes) {
+function getCachedDek(autoLockSeconds) {
   const dek = sessionStorage.getItem(K.DEK);
   const exp = Number(sessionStorage.getItem(K.EXP) || 0);
   if (!dek) return null;
@@ -4917,11 +4917,11 @@ function getCachedDek(autoLockMinutes) {
     clearSession();
     return null;
   }
-  sessionStorage.setItem(K.EXP, String(Date.now() + autoLockMinutes * 6e4));
+  sessionStorage.setItem(K.EXP, String(Date.now() + autoLockSeconds * 1e3));
   return base64ToBytes(dek);
 }
-function touchSession(autoLockMinutes) {
-  if (sessionStorage.getItem(K.DEK)) sessionStorage.setItem(K.EXP, String(Date.now() + autoLockMinutes * 6e4));
+function touchSession(autoLockSeconds) {
+  if (sessionStorage.getItem(K.DEK)) sessionStorage.setItem(K.EXP, String(Date.now() + autoLockSeconds * 1e3));
 }
 function clearSession() {
   sessionStorage.removeItem(K.DEK);
@@ -4963,7 +4963,9 @@ var I = {
   refresh: "\u21BB",
   star: "\u2605",
   sync: "\u27F3",
-  clock: "\u23F1"
+  clock: "\u23F1",
+  user: "\u{1F464}",
+  key: "\u{1F511}"
 };
 function toast(msg, type = "info") {
   let c = document.querySelector(".vs-toast-container");
@@ -5032,7 +5034,7 @@ function resetIdle() {
     clearSession();
     renderLocked();
     toast("Vault locked", "info");
-  }, settings.autoLockTimeout * 6e4);
+  }, settings.autoLockTimeout * 1e3);
 }
 ["click", "keydown", "touchstart"].forEach((ev) => document.addEventListener(ev, resetIdle, { passive: true }));
 async function boot() {
@@ -5210,15 +5212,11 @@ function list(body, q) {
   if (!entries.length) return body.append(h("div", { class: "okey-empty", text: q ? "No matches" : "No items yet. Tap + to add." }));
   entries.forEach((e) => {
     const actions = h("div", { class: "okey-entry-actions" });
-    if (e.username) actions.append(iconBtn(I.copy, "Copy username", (ev) => {
+    if (e.username) actions.append(iconBtn(I.user, "Copy username", (ev) => {
       ev.stopPropagation();
       copyValue(e.username, "Username copied");
     }));
-    if (e.id) actions.append(iconBtn(I.copy, "Copy ID", (ev) => {
-      ev.stopPropagation();
-      copyValue(e.id, "ID copied");
-    }));
-    if (e.password) actions.append(iconBtn(I.copy, "Copy password", (ev) => {
+    if (e.password) actions.append(iconBtn(I.key, "Copy password", (ev) => {
       ev.stopPropagation();
       copyValue(e.password, "Password copied");
     }));
@@ -5463,7 +5461,7 @@ async function renderSettings() {
     appbar("Settings", renderMain),
     group(
       "Security",
-      numberSetting("Auto-lock (minutes)", settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_MINUTES, SECURITY.MAX_AUTO_LOCK_MINUTES, (v) => saveSettings({ autoLockTimeout: v })),
+      numberSetting("Auto-lock (seconds)", settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => saveSettings({ autoLockTimeout: v })),
       numberSetting("Clipboard clear (seconds)", settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => saveSettings({ clipboardClearTimeout: v })),
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Theme" }), themeSel)
     ),

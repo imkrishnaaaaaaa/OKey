@@ -43,7 +43,7 @@ function h(tag, props = {}, ...kids) {
 const clear = (n) => n.replaceChildren();
 
 const I = {
-  copy: '⧉', eye: '👁', edit: '✎', trash: '🗑', back: '‹', plus: '+', gear: '⚙', refresh: '↻', star: '★', sync: '⟳', clock: '⏱',
+  copy: '⧉', eye: '👁', edit: '✎', trash: '🗑', back: '‹', plus: '+', gear: '⚙', refresh: '↻', star: '★', sync: '⟳', clock: '⏱', user: '👤', key: '🔑',
 };
 
 function toast(msg, type = 'info') {
@@ -210,9 +210,8 @@ function list(body, q) {
   if (!entries.length) return body.append(h('div', { class: 'okey-empty', text: q ? 'No matches' : 'No items yet. Tap + to add.' }));
   entries.forEach((e) => {
     const actions = h('div', { class: 'okey-entry-actions' });
-    if (e.username) actions.append(iconBtn(I.copy, 'Copy username', (ev) => { ev.stopPropagation(); copyValue(e.username, 'Username copied'); }));
-    if (e.id) actions.append(iconBtn(I.copy, 'Copy ID', (ev) => { ev.stopPropagation(); copyValue(e.id, 'ID copied'); }));
-    if (e.password) actions.append(iconBtn(I.copy, 'Copy password', (ev) => { ev.stopPropagation(); copyValue(e.password, 'Password copied'); }));
+    if (e.username) actions.append(iconBtn(I.user, 'Copy username', (ev) => { ev.stopPropagation(); copyValue(e.username, 'Username copied'); }));
+    if (e.password) actions.append(iconBtn(I.key, 'Copy password', (ev) => { ev.stopPropagation(); copyValue(e.password, 'Password copied'); }));
     if (e.totpSecret) actions.append(iconBtn(I.clock, 'Copy code', async (ev) => {
       ev.stopPropagation();
       const { code } = await generateTOTP(e.totpSecret);

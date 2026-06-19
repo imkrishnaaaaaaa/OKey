@@ -44,8 +44,8 @@ export const CRYPTO = Object.freeze({
 
 /** Auto-lock (seconds), clipboard, and session security defaults. */
 export const SECURITY = Object.freeze({
-  DEFAULT_AUTO_LOCK_SECONDS: 300,
-  MIN_AUTO_LOCK_SECONDS: 1,
+  DEFAULT_AUTO_LOCK_SECONDS: 60,
+  MIN_AUTO_LOCK_SECONDS: 30,
   MAX_AUTO_LOCK_SECONDS: 1800,
   /** Re-open popup within this window → restore unlocked session without re-typing. */
   SESSION_REUNLOCK_COOLDOWN_MINUTES: 1,

@@ -191,19 +191,51 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 11px 18px;
   border-radius: var(--vs-radius-pill);
   background: var(--vs-bg-elev-3);
   color: var(--vs-text);
-  box-shadow: var(--vs-shadow-md);
-  font-size: var(--vs-fs-sm);
-  font-weight: 500;
+  box-shadow: var(--vs-shadow-lg);
+  font-size: var(--vs-fs-md);
+  font-weight: 600;
+  border: 1px solid var(--vs-border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   animation: vs-toast-in var(--vs-dur) var(--vs-ease);
 }
 .vs-toast-icon { width: 18px; height: 18px; flex: 0 0 18px; }
-.vs-toast-success { color: var(--vs-success); }
-.vs-toast-error { color: var(--vs-danger); }
-.vs-toast-warning { color: var(--vs-warning); }
+.vs-toast-success {
+  background: rgba(46, 204, 113, 0.14) !important;
+  border-color: rgba(46, 204, 113, 0.35) !important;
+  color: #2ecc71 !important;
+}
+[data-theme='light'] .vs-toast-success {
+  background: rgba(46, 204, 113, 0.08) !important;
+  border-color: rgba(46, 204, 113, 0.4) !important;
+  color: #27ae60 !important;
+}
+.vs-toast-error {
+  background: rgba(255, 92, 108, 0.14) !important;
+  border-color: rgba(255, 92, 108, 0.35) !important;
+  color: #ff5c6c !important;
+}
+[data-theme='light'] .vs-toast-error {
+  background: rgba(255, 92, 108, 0.08) !important;
+  border-color: rgba(255, 92, 108, 0.4) !important;
+  color: #c0392b !important;
+}
+.vs-toast-warning,
+.vs-toast-info {
+  background: rgba(109, 94, 252, 0.14) !important;
+  border-color: rgba(109, 94, 252, 0.35) !important;
+  color: #8c7ffc !important;
+}
+[data-theme='light'] .vs-toast-warning,
+[data-theme='light'] .vs-toast-info {
+  background: rgba(109, 94, 252, 0.08) !important;
+  border-color: rgba(109, 94, 252, 0.3) !important;
+  color: #5b4be8 !important;
+}
 .vs-toast-exit { animation: vs-toast-out var(--vs-dur) var(--vs-ease) forwards; }
 @keyframes vs-toast-in { from { opacity: 0; transform: translateY(8px); } }
 @keyframes vs-toast-out { to { opacity: 0; transform: translateY(8px); } }

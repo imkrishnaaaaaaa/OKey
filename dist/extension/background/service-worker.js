@@ -56,9 +56,9 @@ var CRYPTO = Object.freeze({
   SALT_LENGTH: 32
 });
 var SECURITY = Object.freeze({
-  DEFAULT_AUTO_LOCK_MINUTES: 5,
-  MIN_AUTO_LOCK_MINUTES: 1,
-  MAX_AUTO_LOCK_MINUTES: 60,
+  DEFAULT_AUTO_LOCK_SECONDS: 60,
+  MIN_AUTO_LOCK_SECONDS: 30,
+  MAX_AUTO_LOCK_SECONDS: 1800,
   /** Re-open popup within this window → restore unlocked session without re-typing. */
   SESSION_REUNLOCK_COOLDOWN_MINUTES: 1,
   DEFAULT_CLIPBOARD_CLEAR_SECONDS: 30,
@@ -109,7 +109,7 @@ var FAVICON = Object.freeze({
   PROVIDER: "https://www.google.com/s2/favicons"
 });
 var DEFAULT_SETTINGS = Object.freeze({
-  autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_MINUTES,
+  autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -4718,28 +4718,28 @@ async function hardenSession() {
   } catch {
   }
 }
-async function touchSession(autoLockMinutes = SECURITY.DEFAULT_AUTO_LOCK_MINUTES) {
+async function touchSession(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
   const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
   if (!s[K.DEK]) return false;
   if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
     await clearSession();
     return false;
   }
-  const minutes = clamp(autoLockMinutes, SECURITY.MIN_AUTO_LOCK_MINUTES, SECURITY.MAX_AUTO_LOCK_MINUTES);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + minutes * 6e4 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: minutes });
+  const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
+  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
+  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
   return true;
 }
-async function getCachedDek(autoLockMinutes = SECURITY.DEFAULT_AUTO_LOCK_MINUTES) {
+async function getCachedDek(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
   const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
   if (!s[K.DEK]) return null;
   if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
     await clearSession();
     return null;
   }
-  const minutes = clamp(autoLockMinutes, SECURITY.MIN_AUTO_LOCK_MINUTES, SECURITY.MAX_AUTO_LOCK_MINUTES);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + minutes * 6e4 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: minutes });
+  const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
+  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
+  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
   return base64ToBytes(s[K.DEK]);
 }
 async function clearSession() {

@@ -34,9 +34,9 @@
     SALT_LENGTH: 32
   });
   var SECURITY = Object.freeze({
-    DEFAULT_AUTO_LOCK_MINUTES: 5,
-    MIN_AUTO_LOCK_MINUTES: 1,
-    MAX_AUTO_LOCK_MINUTES: 60,
+    DEFAULT_AUTO_LOCK_SECONDS: 60,
+    MIN_AUTO_LOCK_SECONDS: 30,
+    MAX_AUTO_LOCK_SECONDS: 1800,
     /** Re-open popup within this window → restore unlocked session without re-typing. */
     SESSION_REUNLOCK_COOLDOWN_MINUTES: 1,
     DEFAULT_CLIPBOARD_CLEAR_SECONDS: 30,
@@ -87,7 +87,7 @@
     PROVIDER: "https://www.google.com/s2/favicons"
   });
   var DEFAULT_SETTINGS = Object.freeze({
-    autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_MINUTES,
+    autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
     sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
     clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
     biometricEnabled: false,

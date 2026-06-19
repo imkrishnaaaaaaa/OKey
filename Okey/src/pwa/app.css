@@ -1,0 +1,79 @@
+/**
+ * OKey PWA — mobile-first layout (centered on larger screens).
+ */
+.okey-app {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--vs-bg);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.okey-appbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  padding-top: max(14px, env(safe-area-inset-top));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.okey-appbar-title { font-size: var(--vs-fs-lg); font-weight: 700; }
+.okey-logo { display: flex; align-items: center; gap: 6px; font-size: var(--vs-fs-lg); font-weight: 800; }
+.okey-logo.okey-hero { justify-content: center; font-size: 26px; padding: 36px 0 12px; }
+
+.okey-searchbar { padding: 8px 16px; }
+.okey-searchbar .vs-input { border-radius: var(--vs-radius-pill); }
+.okey-tabs { display: flex; gap: 6px; padding: 4px 16px 8px; }
+.okey-tab {
+  flex: 1; padding: 10px 4px; border: none; background: transparent; color: var(--vs-text-muted);
+  font: inherit; font-weight: 600; font-size: var(--vs-fs-sm); border-radius: var(--vs-radius-pill); cursor: pointer;
+}
+.okey-tab[aria-selected='true'] { background: var(--vs-brand-soft); color: var(--vs-brand); }
+
+.okey-body { flex: 1; overflow-y: auto; padding: 6px 16px 90px; }
+.okey-view { padding: 12px 16px 90px; }
+.okey-centered { display: flex; flex-direction: column; justify-content: center; min-height: 80vh; max-width: 420px; margin: 0 auto; }
+
+.okey-entry {
+  display: flex; align-items: center; gap: 12px; padding: 13px 12px;
+  border-radius: var(--vs-radius-md); cursor: pointer; transition: background var(--vs-dur);
+}
+.okey-entry:active { background: var(--vs-bg-elev-2); }
+.okey-entry-actions { display: flex; gap: 4px; }
+.okey-entry-main { flex: 1; min-width: 0; }
+.okey-entry-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.okey-entry-sub { font-size: var(--vs-fs-sm); color: var(--vs-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.okey-empty { text-align: center; color: var(--vs-text-faint); padding: 60px 16px; }
+
+.okey-fab {
+  position: fixed; right: max(20px, calc(50% - 240px + 20px)); bottom: calc(24px + env(safe-area-inset-bottom));
+  width: 56px; height: 56px; border-radius: var(--vs-radius-pill); border: none;
+  background: linear-gradient(135deg, var(--vs-brand), var(--vs-brand-strong)); color: #fff;
+  font-size: 28px; box-shadow: 0 8px 24px var(--vs-brand-glow); cursor: pointer; z-index: 20;
+}
+.okey-fab:active { transform: scale(0.94); }
+
+.okey-detail-field { padding: 14px 16px; background: var(--vs-bg-elev-1); border: 1px solid var(--vs-border); border-radius: var(--vs-radius-md); margin-bottom: 10px; }
+.okey-detail-label { font-size: var(--vs-fs-xs); color: var(--vs-text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+.okey-detail-value { display: flex; align-items: center; gap: 8px; margin-top: 4px; word-break: break-all; }
+.okey-detail-value .val { flex: 1; }
+.okey-totp-code { font-family: var(--vs-mono); font-size: var(--vs-fs-xl); letter-spacing: 2px; }
+
+.okey-custom-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.okey-custom-row .vs-input { flex: 1; }
+
+.okey-recovery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 14px 0; }
+.okey-recovery-word { display: flex; gap: 6px; align-items: baseline; padding: 10px; background: var(--vs-bg-elev-2); border-radius: var(--vs-radius-sm); font-family: var(--vs-mono); font-size: var(--vs-fs-sm); }
+.okey-recovery-word b { color: var(--vs-text-faint); font-size: 10px; min-width: 18px; }
+.okey-warn { background: rgba(245,166,35,0.12); border: 1px solid rgba(245,166,35,0.3); color: var(--vs-warning); padding: 12px 14px; border-radius: var(--vs-radius-md); font-size: var(--vs-fs-sm); margin: 10px 0; }
+
+.okey-section-title { font-size: var(--vs-fs-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--vs-text-faint); font-weight: 700; margin: 16px 0 6px; }
+.okey-settings-group { margin-top: 16px; }
+.okey-setting { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--vs-border); }
+.okey-setting-main { flex: 1; }
+.okey-generator-output { font-family: var(--vs-mono); font-size: var(--vs-fs-lg); word-break: break-all; padding: 16px; background: var(--vs-bg-elev-2); border-radius: var(--vs-radius-md); min-height: 56px; }

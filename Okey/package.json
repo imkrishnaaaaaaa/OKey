@@ -1,0 +1,31 @@
+{
+  "name": "okey",
+  "version": "1.0.0",
+  "description": "OKey — One Key to rule them all. Privacy-first, zero-knowledge password manager (Chrome MV3 extension + mobile PWA) backed by your own Google Sheet.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:extension": "node build.mjs extension",
+    "build:pwa": "node build.mjs pwa",
+    "watch": "node build.mjs --watch"
+  },
+  "keywords": [
+    "password-manager",
+    "chrome-extension",
+    "pwa",
+    "encryption",
+    "zero-knowledge",
+    "argon2",
+    "totp",
+    "okey"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "@scure/bip39": "^1.6.0",
+    "hash-wasm": "^4.12.0"
+  }
+}

@@ -1,0 +1,95 @@
+/**
+ * OKey — Design Tokens
+ * Shared visual language for the extension popup and the PWA.
+ * Dark mode is dark charcoal (#111) rather than pitch black for a softer,
+ * more premium feel. Light mode is a warm off-white.
+ */
+
+:root {
+  /* Brand */
+  --vs-brand: #6d5efc;
+  --vs-brand-strong: #5b4be8;
+  --vs-brand-soft: rgba(109, 94, 252, 0.14);
+  --vs-brand-glow: rgba(109, 94, 252, 0.35);
+
+  /* Status */
+  --vs-success: #2ecc71;
+  --vs-warning: #f5a623;
+  --vs-danger: #ff5c6c;
+  --vs-info: #4aa8ff;
+
+  /* Radius — generous, modern (feedback #9, #23) */
+  --vs-radius-sm: 8px;
+  --vs-radius-md: 12px;
+  --vs-radius-lg: 16px;
+  --vs-radius-xl: 22px;
+  --vs-radius-pill: 999px;
+
+  /* Spacing */
+  --vs-space-1: 4px;
+  --vs-space-2: 8px;
+  --vs-space-3: 12px;
+  --vs-space-4: 16px;
+  --vs-space-5: 20px;
+  --vs-space-6: 24px;
+
+  /* Typography */
+  --vs-font: ui-rounded, 'SF Pro Rounded', 'Segoe UI Rounded', 'Nunito', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --vs-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Roboto Mono', Menlo, monospace;
+  --vs-fs-xs: 11px;
+  --vs-fs-sm: 12px;
+  --vs-fs-md: 14px;
+  --vs-fs-lg: 16px;
+  --vs-fs-xl: 20px;
+
+  /* Motion */
+  --vs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --vs-dur: 180ms;
+
+  /* Shadows */
+  --vs-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --vs-shadow-md: 0 6px 20px rgba(0, 0, 0, 0.28);
+  --vs-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+/* Dark (default) — dark charcoal, not pure black */
+:root,
+[data-theme='dark'] {
+  --vs-bg: #111214;
+  --vs-bg-elev-1: #17181b;
+  --vs-bg-elev-2: #1e2024;
+  --vs-bg-elev-3: #26282d;
+  --vs-surface: #15161a;
+  --vs-border: rgba(255, 255, 255, 0.09);
+  --vs-border-strong: rgba(255, 255, 255, 0.16);
+  --vs-text: #f3f4f6;
+  --vs-text-muted: #a6adba;
+  --vs-text-faint: #6f7682;
+  --vs-glass: rgba(23, 24, 27, 0.55);
+  --vs-glass-border: rgba(255, 255, 255, 0.05);
+  --vs-overlay: rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --vs-bg: #f6f7f9;
+  --vs-bg-elev-1: #ffffff;
+  --vs-bg-elev-2: #ffffff;
+  --vs-bg-elev-3: #eef0f4;
+  --vs-surface: #ffffff;
+  --vs-border: rgba(15, 18, 25, 0.1);
+  --vs-border-strong: rgba(15, 18, 25, 0.18);
+  --vs-text: #121417;
+  --vs-text-muted: #56606e;
+  --vs-text-faint: #8a93a0;
+  --vs-glass: rgba(255, 255, 255, 0.55);
+  --vs-glass-border: rgba(15, 18, 25, 0.05);
+  --vs-overlay: rgba(15, 18, 25, 0.35);
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --vs-dur: 0ms;
+  }
+}

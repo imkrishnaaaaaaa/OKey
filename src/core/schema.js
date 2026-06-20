@@ -15,6 +15,7 @@ import { ValidationError } from './errors.js';
  * @property {string} siteName
  * @property {string} nickname
  * @property {string} entryType       'password' | 'totp'
+ * @property {string} folder          folder name (cleartext metadata, searchable)
  * @property {string[]} tags
  * @property {string[]} matchPatterns glob URL patterns, e.g. "site.com/login/*"
  * @property {boolean} isFavorite
@@ -38,7 +39,7 @@ export const SENSITIVE_FIELDS = Object.freeze(['username', 'password', 'totpSecr
 
 /** Cleartext metadata fields stored alongside ciphertext (searchable/syncable). */
 export const METADATA_FIELDS = Object.freeze([
-  'id', 'domain', 'entryType', 'version', 'isDeleted', 'updatedAt', 'displayOrder', 'isPinned',
+  'id', 'domain', 'entryType', 'version', 'isDeleted', 'updatedAt', 'displayOrder', 'isPinned', 'folder',
 ]);
 
 const isString = (v) => typeof v === 'string';
@@ -60,6 +61,7 @@ export function createEntry(data, genId, nowIso) {
     siteName: clampStr(data.siteName, 200),
     nickname: clampStr(data.nickname, 200),
     entryType,
+    folder: clampStr(data.folder, 200),
     tags: sanitizeStringArray(data.tags, 30, 50),
     matchPatterns: sanitizeStringArray(data.matchPatterns, 20, 300),
     isFavorite: !!data.isFavorite,

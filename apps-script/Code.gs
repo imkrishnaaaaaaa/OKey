@@ -21,7 +21,7 @@ const SHEETS = {
 };
 const HEADER = 1;
 const START = 2;
-const VAULT_COLS = ['ID', 'Domain', 'EntryType', 'Version', 'IsDeleted', 'UpdatedAt', 'DisplayOrder', 'IsPinned', 'Payload'];
+const VAULT_COLS = ['ID', 'Domain', 'EntryType', 'Version', 'IsDeleted', 'UpdatedAt', 'DisplayOrder', 'IsPinned', 'Folder', 'Payload'];
 
 function doGet(e) { return handle(e); }
 function doPost(e) { return handle(e); }
@@ -35,6 +35,7 @@ function handle(e) {
       case 'ping': return json({ status: 'ok', timestamp: nowIso(), email: safeEmail() });
       case 'initVault': return initVault();
       case 'getVault': return getVault();
+      case 'getFolders': return getFolders();
       case 'syncEntries': return syncEntries(body);
       case 'saveMetadata': return saveKv(SHEETS.META, body.metadata || {});
       case 'getSettings': return getKv(SHEETS.SETTINGS, true);
@@ -59,6 +60,8 @@ function ensureSheet(name, header) {
   let sheet = ss().getSheetByName(name);
   if (!sheet) {
     sheet = ss().insertSheet(name);
+  }
+  if (sheet.getLastRow() === 0) {
     sheet.appendRow(header);
     sheet.setFrozenRows(1);
   }
@@ -90,7 +93,9 @@ function readVault() {
         id: r[0], domain: r[1], entryType: r[2], version: Number(r[3]) || 1,
         isDeleted: r[4] === true || r[4] === 'TRUE' || r[4] === 'true',
         updatedAt: r[5], displayOrder: Number(r[6]) || 0,
-        isPinned: r[7] === true || r[7] === 'TRUE' || r[7] === 'true', payload: r[8],
+        isPinned: r[7] === true || r[7] === 'TRUE' || r[7] === 'true',
+        folder: r[8] || '',
+        payload: r[9],
       };
       rec._row = i + START;
       map[rec.id] = rec;
@@ -101,7 +106,7 @@ function readVault() {
 }
 
 function rowValues(e) {
-  return [e.id, e.domain || '', e.entryType || 'password', e.version || 1, !!e.isDeleted, e.updatedAt || nowIso(), e.displayOrder || 0, !!e.isPinned, e.payload || ''];
+  return [e.id, e.domain || '', e.entryType || 'password', e.version || 1, !!e.isDeleted, e.updatedAt || nowIso(), e.displayOrder || 0, !!e.isPinned, e.folder || '', e.payload || ''];
 }
 function stripRow(r) { const c = {}; for (const k in r) if (k !== '_row') c[k] = r[k]; return c; }
 
@@ -195,4 +200,16 @@ function getOrder() {
     }
   }
   return json({ status: 'ok', order: out });
+}
+
+function getFolders() {
+  const v = readVault();
+  const set = {};
+  v.list.forEach(function(r) {
+    if (r.folder && !r.isDeleted) {
+      set[r.folder] = true;
+    }
+  });
+  const folders = Object.keys(set).sort();
+  return json({ status: 'ok', folders: folders });
 }

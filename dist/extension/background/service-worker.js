@@ -4432,18 +4432,20 @@ var SyncEngine = class {
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
   }
   // ---- Remote calls ----
-  /** @private */
   async _call(action, body) {
     const profile = await this.getActiveProfile();
     if (!profile?.appsScriptUrl) throw new SyncError("No vault sheet configured", "NO_PROFILE");
     const token = await this.network.getAuthToken();
-    if (!token) throw new SyncError("Not authenticated with Google", "NO_AUTH");
     const url = `${profile.appsScriptUrl}?action=${encodeURIComponent(action)}`;
     let res;
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
       res = await this.network.fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers,
         body: JSON.stringify(body || {})
       });
     } catch (e) {

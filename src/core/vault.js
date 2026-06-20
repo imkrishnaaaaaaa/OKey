@@ -34,7 +34,7 @@ import { generateUuid, nowIso, deepClone } from './util.js';
 import { VaultLockedError, DecryptionError, ValidationError } from './errors.js';
 
 /** Fields kept cleartext in the at-rest record (everything else is encrypted). */
-const META_KEYS = ['id', 'domain', 'entryType', 'version', 'isDeleted', 'updatedAt', 'displayOrder', 'isPinned'];
+const META_KEYS = ['id', 'domain', 'entryType', 'version', 'isDeleted', 'updatedAt', 'displayOrder', 'isPinned', 'folder'];
 
 export class Vault {
   /** @param {import('./adapters.js').StorageAdapter} storage */
@@ -499,6 +499,7 @@ export class Vault {
           updatedAt: rec.updatedAt,
           displayOrder: rec.displayOrder,
           isPinned: rec.isPinned,
+          folder: rec.folder,
         },
         generateUuid,
         nowIso,

@@ -145,6 +145,8 @@ export const STORAGE_KEYS = Object.freeze({
   BIOMETRIC_CRED_ID: 'okey_biometric_cred_id',
   BIOMETRIC_WRAPPED: 'okey_biometric_wrapped',
   SCHEMA_MIGRATED: 'okey_schema_migrated',
+  CACHED_FOLDERS: 'okey_cached_folders',
+  FOLDERS_CACHE_TIME: 'okey_folders_cache_time',
 });
 
 /** Legacy → new storage-key map for one-time migration of test data. */

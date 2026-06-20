@@ -42,15 +42,29 @@ export class SyncEngine {
   }
 
   async addProfile({ label, appsScriptUrl, sheetId }) {
-    if (!/^https:\/\/script\.google\.com\//.test(appsScriptUrl || '')) {
+    const trimmedUrl = (appsScriptUrl || '').trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
       throw new SyncError('Apps Script URL must start with https://script.google.com/', 'BAD_URL');
     }
     const sheets = await this.getProfiles();
     if (sheets.length >= APP.MAX_SHEETS) throw new SyncError(`Maximum ${APP.MAX_SHEETS} vaults`, 'MAX_SHEETS');
+
+    const trimmedLabel = (label || `Vault ${sheets.length + 1}`).trim();
+
+    const duplicateUrl = sheets.find((s) => s.appsScriptUrl.trim() === trimmedUrl);
+    if (duplicateUrl) {
+      throw new SyncError('A vault with this Apps Script URL already exists', 'DUPLICATE_URL');
+    }
+
+    const duplicateLabel = sheets.find((s) => s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+    if (duplicateLabel) {
+      throw new SyncError('A vault with this name already exists', 'DUPLICATE_LABEL');
+    }
+
     const profile = {
       id: generateUuid(),
-      label: (label || `Vault ${sheets.length + 1}`).slice(0, 60),
-      appsScriptUrl,
+      label: trimmedLabel.slice(0, 60),
+      appsScriptUrl: trimmedUrl,
       sheetId: sheetId || '',
       isActive: sheets.length === 0,
     };
@@ -63,8 +77,21 @@ export class SyncEngine {
     const sheets = await this.getProfiles();
     const p = sheets.find((s) => s.id === id);
     if (!p) throw new SyncError('Profile not found', 'NOT_FOUND');
-    if (patch.label !== undefined) p.label = String(patch.label).slice(0, 60);
-    if (patch.appsScriptUrl !== undefined) p.appsScriptUrl = patch.appsScriptUrl;
+    if (patch.label !== undefined) {
+      const trimmedLabel = String(patch.label).trim();
+      const duplicateLabel = sheets.find((s) => s.id !== id && s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+      if (duplicateLabel) throw new SyncError('A vault with this name already exists', 'DUPLICATE_LABEL');
+      p.label = trimmedLabel.slice(0, 60);
+    }
+    if (patch.appsScriptUrl !== undefined) {
+      const trimmedUrl = String(patch.appsScriptUrl).trim();
+      if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+        throw new SyncError('Apps Script URL must start with https://script.google.com/', 'BAD_URL');
+      }
+      const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
+      if (duplicateUrl) throw new SyncError('A vault with this Apps Script URL already exists', 'DUPLICATE_URL');
+      p.appsScriptUrl = trimmedUrl;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
   }
@@ -85,18 +112,20 @@ export class SyncEngine {
 
   // ---- Remote calls ----
 
-  /** @private */
   async _call(action, body) {
     const profile = await this.getActiveProfile();
     if (!profile?.appsScriptUrl) throw new SyncError('No vault sheet configured', 'NO_PROFILE');
     const token = await this.network.getAuthToken();
-    if (!token) throw new SyncError('Not authenticated with Google', 'NO_AUTH');
     const url = `${profile.appsScriptUrl}?action=${encodeURIComponent(action)}`;
     let res;
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
       res = await this.network.fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers,
         body: JSON.stringify(body || {}),
       });
     } catch (e) {
@@ -116,6 +145,31 @@ export class SyncEngine {
   /** Create/repair the Sheet tab structure. */
   async setupSheet() {
     return this._call('initVault', {});
+  }
+
+  /** Get or fetch unique folders list. */
+  async getFolders(force = false) {
+    const cached = await this.storage.get([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    const list = cached[STORAGE_KEYS.CACHED_FOLDERS] || [];
+    const time = cached[STORAGE_KEYS.FOLDERS_CACHE_TIME] || 0;
+    const now = Date.now();
+
+    // Refresh if force is true, list is empty, or cache is older than 24 hours (86400000 ms)
+    if (force || !list.length || (now - time) > 24 * 60 * 60 * 1000) {
+      try {
+        const result = await this._call('getFolders', {});
+        if (result && result.folders) {
+          await this.storage.set({
+            [STORAGE_KEYS.CACHED_FOLDERS]: result.folders,
+            [STORAGE_KEYS.FOLDERS_CACHE_TIME]: now,
+          });
+          return result.folders;
+        }
+      } catch (e) {
+        console.error("Failed to fetch folders:", e);
+      }
+    }
+    return list;
   }
 
   /**

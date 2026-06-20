@@ -37,6 +37,15 @@ let totpTimer = null;
 let selectMode = false;
 const selected = new Set();
 let lastActivityTouch = 0;
+let syncStatus = 'idle'; // 'idle' | 'syncing' | 'ok' | 'err'
+
+function updateSyncUI(status) {
+  syncStatus = status;
+  const dot = document.querySelector('.okey-sync-dot');
+  if (dot) {
+    dot.className = 'okey-sync-dot ' + (status === 'idle' ? '' : status);
+  }
+}
 
 // ---------- tiny DOM helper ----------
 function h(tag, props = {}, ...kids) {
@@ -374,7 +383,12 @@ function renderLocked({ overlay = false } = {}) {
       pw.select();
     }
   };
-  pw.addEventListener('keydown', (e) => e.key === 'Enter' && submit());
+  pw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
+  });
   btn.addEventListener('click', submit);
 
   const lockCard = h('div', { class: useOverlay ? 'okey-lock-card vs-glass' : 'okey-view okey-lock-full' },

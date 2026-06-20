@@ -4490,7 +4490,7 @@ var SyncEngine = class {
           return result.folders;
         }
       } catch (e) {
-        console.error("Failed to fetch folders:", e);
+        if (e?.code !== "NO_PROFILE") console.error("Failed to fetch folders:", e);
       }
     }
     return list2;
@@ -5027,6 +5027,8 @@ function toast(msg, type = "info") {
   let c = document.querySelector(".vs-toast-container");
   if (!c) {
     c = h("div", { class: "vs-toast-container" });
+    document.body.append(c);
+  } else {
     document.body.append(c);
   }
   const t = h("div", { class: `vs-toast vs-toast-${type}` }, msg);

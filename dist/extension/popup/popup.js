@@ -5172,6 +5172,8 @@ function toast(message, type = "info") {
   if (!c) {
     c = h("div", { class: "vs-toast-container" });
     document.body.append(c);
+  } else {
+    document.body.append(c);
   }
   const t = h("div", { class: `vs-toast vs-toast-${type}` }, message);
   c.append(t);

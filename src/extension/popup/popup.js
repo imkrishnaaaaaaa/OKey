@@ -85,7 +85,12 @@ const ICONS = {
 // ---------- toast ----------
 function toast(message, type = 'info') {
   let c = document.querySelector('.vs-toast-container');
-  if (!c) { c = h('div', { class: 'vs-toast-container' }); document.body.append(c); }
+  if (!c) {
+    c = h('div', { class: 'vs-toast-container' });
+    document.body.append(c);
+  } else {
+    document.body.append(c); // Always bring toast container to the top of body's DOM
+  }
   const t = h('div', { class: `vs-toast vs-toast-${type}` }, message);
   c.append(t);
   setTimeout(() => { t.classList.add('vs-toast-exit'); t.addEventListener('animationend', () => t.remove()); }, 2600);

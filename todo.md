@@ -31,3 +31,12 @@ Below is the list of planned features, UI/UX changes, and branding tasks to be i
   - Create and configure new custom outline lock logos (an "O"-shaped lock outline) to replace the current generic shield icon.
   - Update logo image files in `assets/`, `src/extension/icons/`, and `src/pwa/icons/`.
   - Update Chrome extension `manifest.json` and PWA `manifest.webmanifest` icon declarations.
+
+- **Improvements from AppScript Code changes:**
+  - **Version Control & Compatibility Guard:** Use the `version` API to compare the Apps Script backend version with the local Extension/PWA version. If there's a mismatch, show a warning/error popup advising the user to update their deployed Apps Script code.
+  - **Live Vault Dashboard & Status:** Use the `dashboard` and `health` APIs to show a "Vault Status" view. Display total entries, active items, last sync timestamp, and a real-time "Connected" indicator.
+  - **Rich Analytics & Insights View:** Use the `analytics` API to display a visual breakdown (e.g., charts or stats) showing entry types (passwords vs notes) and folder distribution to help users understand their data.
+  - **Cross-Device Settings Sync:** Leverage the `settings` and `saveSettings` APIs so user preferences (auto-lock timeout, theme, clipboard clear intervals) are synced automatically across the Chrome Extension and PWA.
+  - **Custom Drag-and-Drop Order:** Utilize the `getOrder` and `saveOrder` APIs to let users manually reorder their pinned or favorite passwords, persisting this custom layout across all devices.
+  - **Smart Folder Caching & Autocomplete:** Use the `getFolders` API to fetch a lightweight list of unique folders to provide smart autocomplete and fast filtering UI without needing to parse the entire vault payload.
+  - **Global Cryptographic Metadata:** Use `metadata` and `saveMetadata` to safely store global variables like Argon2 parameters, salts, and wrapped keys, allowing cross-device recovery independent of individual password entries.

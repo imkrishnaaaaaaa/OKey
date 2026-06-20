@@ -536,7 +536,7 @@ function analytics() {
 }
 
 
-End Points & sample respone:
+/* End Points & sample respone:
 
 Details:
 🛠 System & Health Endpoints
@@ -619,4 +619,4 @@ https://script.google.com/macros/s/AKfycbwfhZUvxvgWI-Ye8QU49nQ5T4az6qhPj7bAInKqX
 
 
 https://script.google.com/macros/s/AKfycbwfhZUvxvgWI-Ye8QU49nQ5T4az6qhPj7bAInKqX4eur3dAFntQuUuNadnFvw6aAL8b/exec?action=analytics
-{"activeEntries":2,"deletedEntries":0,"entryTypes":{"password":2},"folders":{"Test":1,"Test2":1},"status":"ok"}
+{"activeEntries":2,"deletedEntries":0,"entryTypes":{"password":2},"folders":{"Test":1,"Test2":1},"status":"ok"}*/

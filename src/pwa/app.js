@@ -297,15 +297,34 @@ function renderEdit(id) {
   clear(app);
   const siteName = inp('Site name', e.siteName, true, 'e.g. GitHub');
   const domain = inp('Domain', e.domain, true, 'github.com');
-  const folder = inp('Folder', e.folder, false, 'e.g. Work, Personal');
-  folder.input.setAttribute('list', 'okey-folders-list');
-  const datalist = h('datalist', { id: 'okey-folders-list' });
-  folder.field.append(datalist);
-  sync.getFolders().then((folders) => {
-    folders.forEach((fld) => {
-      datalist.append(h('option', { value: fld }));
-    });
-  }).catch((err) => console.error("Error loading folders datalist", err));
+
+  // Folder dropdown configuration
+  const activeFolders = [...new Set(vault.getEntries().map(x => x.folder).filter(Boolean))].sort();
+  const folderSelect = h('select', { class: 'vs-select', style: 'width:100%' },
+    h('option', { value: '', text: '(None)' }),
+    ...activeFolders.map(fld => h('option', { value: fld, text: fld, selected: e.folder === fld })),
+    h('option', { value: '__new__', text: '+ Create new folder...', selected: e.folder && !activeFolders.includes(e.folder) })
+  );
+  const newFolderInput = h('input', {
+    class: 'vs-input',
+    placeholder: 'New folder name',
+    style: e.folder && !activeFolders.includes(e.folder) ? 'margin-top:8px;display:block' : 'margin-top:8px;display:none',
+    value: e.folder && !activeFolders.includes(e.folder) ? e.folder : ''
+  });
+  folderSelect.addEventListener('change', () => {
+    if (folderSelect.value === '__new__') {
+      newFolderInput.style.display = 'block';
+      newFolderInput.focus();
+    } else {
+      newFolderInput.style.display = 'none';
+      newFolderInput.value = '';
+    }
+  });
+  const folderField = h('div', { class: 'vs-field' },
+    h('label', { class: 'vs-label' }, 'Folder', h('span', { class: 'vs-optional', text: ' (optional)' })),
+    folderSelect,
+    newFolderInput
+  );
 
   const username = inp('Username / email', e.username, false);
   const pw = h('input', { class: 'vs-input', value: e.password, placeholder: 'Password' });
@@ -317,9 +336,10 @@ function renderEdit(id) {
   (e.customFields || []).forEach((c) => customWrap.append(customRow(c)));
   const save = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: editing ? 'Save' : 'Add item' });
   save.addEventListener('click', async () => {
+    const chosenFolder = folderSelect.value === '__new__' ? newFolderInput.value.trim() : folderSelect.value.trim();
     const data = { siteName: siteName.value.trim(), domain: normalizeDomain(domain.value.trim()), username: username.value.trim(),
       password: pw.value, totpSecret: totp.value.replace(/\s+/g, ''), notes: notes.value,
-      folder: folder.value.trim(),
+      folder: chosenFolder,
       tags: (tags.value || '').split(',').map((x) => x.trim()).filter(Boolean),
       customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({ label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
       entryType: totp.value.trim() && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD };
@@ -329,7 +349,7 @@ function renderEdit(id) {
     catch (err) { toast(err.message, 'error'); }
   });
   app.append(h('div', { class: 'okey-view' }, appbar(editing ? 'Edit item' : 'Add item', editing ? () => renderDetail(id) : renderMain),
-    siteName.field, domain.field, folder.field, username.field,
+    siteName.field, domain.field, folderField, username.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Password' }), h('div', { class: 'vs-input-group' }, pw, h('div', { class: 'vs-input-affix' }, gen))),
     totp.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Notes', h('span', { class: 'vs-optional', text: '(optional)' })), notes),

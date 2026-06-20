@@ -171,7 +171,7 @@ export class SyncEngine {
           return result.folders;
         }
       } catch (e) {
-        console.error("Failed to fetch folders:", e);
+        if (e?.code !== 'NO_PROFILE') console.error('Failed to fetch folders:', e);
       }
     }
     return list;

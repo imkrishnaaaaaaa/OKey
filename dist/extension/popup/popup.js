@@ -4502,7 +4502,7 @@ var SyncEngine = class {
           return result.folders;
         }
       } catch (e) {
-        console.error("Failed to fetch folders:", e);
+        if (e?.code !== "NO_PROFILE") console.error("Failed to fetch folders:", e);
       }
     }
     return list;
@@ -5863,15 +5863,55 @@ function renderEdit(id, draft = null, scrollTop = 0) {
   const f = {};
   f.siteName = labeledInput("Site name", e.siteName, true, "e.g. GitHub");
   f.domain = labeledInput("Domain", e.domain, true, "e.g. github.com");
-  f.folder = labeledInput("Folder", e.folder, false, "e.g. Work, Personal");
-  f.folder.input.setAttribute("list", "okey-folders-list");
-  const datalist = h("datalist", { id: "okey-folders-list" });
-  f.folder.field.append(datalist);
-  sync.getFolders().then((folders) => {
-    folders.forEach((folder) => {
-      datalist.append(h("option", { value: folder }));
-    });
-  }).catch((err) => console.error("Error loading folders datalist", err));
+  const activeFolders = [...new Set(vault.getEntries().map((x) => x.folder).filter(Boolean))].sort();
+  const folderSelect = h(
+    "select",
+    { class: "vs-select", style: "width:100%" },
+    h("option", { value: "", text: "(None)" }),
+    ...activeFolders.map((fld) => h("option", { value: fld, text: fld, selected: e.folder === fld })),
+    h("option", { value: "__new__", text: "+ Create new folder...", selected: e.folder && !activeFolders.includes(e.folder) })
+  );
+  const newFolderInput = h("input", {
+    class: "vs-input",
+    placeholder: "New folder name",
+    style: e.folder && !activeFolders.includes(e.folder) ? "margin-top:8px;display:block" : "margin-top:8px;display:none",
+    value: e.folder && !activeFolders.includes(e.folder) ? e.folder : ""
+  });
+  const collectDraft = () => ({
+    siteName: f.siteName.value,
+    domain: f.domain.value,
+    username: f.username.value,
+    password: pwInput.value,
+    totpSecret: f.totp.value,
+    notes: f.notes.value,
+    tags: splitList(f.tags.value),
+    matchPatterns: splitList(f.patterns.value),
+    folder: folderSelect.value === "__new__" ? newFolderInput.value : folderSelect.value,
+    customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({
+      label: r.children[0].value,
+      value: r.children[1].value,
+      hidden: false
+    }))
+  });
+  const saveDraft = () => rememberView({ draft: collectDraft(), scrollTop: app.querySelector(".okey-view")?.scrollTop || 0 });
+  folderSelect.addEventListener("change", () => {
+    if (folderSelect.value === "__new__") {
+      newFolderInput.style.display = "block";
+      newFolderInput.focus();
+    } else {
+      newFolderInput.style.display = "none";
+      newFolderInput.value = "";
+    }
+    saveDraft();
+  });
+  newFolderInput.addEventListener("input", saveDraft);
+  f.folderField = h(
+    "div",
+    { class: "vs-field" },
+    h("label", { class: "vs-label" }, "Folder", h("span", { class: "vs-optional", text: " (optional)" })),
+    folderSelect,
+    newFolderInput
+  );
   f.username = labeledInput("Username / email", e.username, false);
   const pwInput = h("input", { class: "vs-input", type: "text", value: e.password || "", placeholder: "Password" });
   const genBtn = iconBtn(ICONS.refresh, "Generate", () => {
@@ -5895,25 +5935,9 @@ function renderEdit(id, draft = null, scrollTop = 0) {
     customWrap.append(customRow());
     saveDraft();
   } });
-  const collectDraft = () => ({
-    siteName: f.siteName.value,
-    domain: f.domain.value,
-    username: f.username.value,
-    password: pwInput.value,
-    totpSecret: f.totp.value,
-    notes: f.notes.value,
-    tags: splitList(f.tags.value),
-    matchPatterns: splitList(f.patterns.value),
-    folder: f.folder.value,
-    customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({
-      label: r.children[0].value,
-      value: r.children[1].value,
-      hidden: false
-    }))
-  });
-  const saveDraft = () => rememberView({ draft: collectDraft(), scrollTop: app.querySelector(".okey-view")?.scrollTop || 0 });
   const save = h("button", { class: "vs-btn vs-btn-primary vs-btn-block", text: editing ? "Save changes" : "Add item" });
   save.addEventListener("click", async () => {
+    const chosenFolder = folderSelect.value === "__new__" ? newFolderInput.value.trim() : folderSelect.value.trim();
     const data = {
       siteName: f.siteName.value.trim(),
       domain: normalizeDomain(f.domain.value.trim()),
@@ -5923,7 +5947,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
       notes: f.notes.value,
       tags: splitList(f.tags.value),
       matchPatterns: splitList(f.patterns.value),
-      folder: f.folder.value.trim(),
+      folder: chosenFolder,
       customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({
         label: r.children[0].value.trim(),
         value: r.children[1].value,
@@ -5949,7 +5973,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
     viewHeader(editing ? "Edit item" : "Add item", editing ? () => renderDetail(id) : renderMain),
     f.siteName.field,
     f.domain.field,
-    f.folder.field,
+    f.folderField,
     f.username.field,
     h("div", { class: "vs-field" }, label("Password"), h("div", { class: "vs-input-group" }, pwInput, h("div", { class: "vs-input-affix" }, genBtn))),
     f.totp.field,

@@ -167,7 +167,12 @@ function renderLocked() {
     try { await vault.unlock(pw.value); cacheDek(vault.exportDek(), settings.autoLockTimeout); resetIdle(); renderMain(); if (settings.autoSyncEnabled && (await sync.getActiveProfile())) sync.sync(vault).catch(() => {}); }
     catch (e) { btn.disabled = false; btn.textContent = 'Unlock'; toast(e.code === 'DECRYPTION_FAILED' ? 'Incorrect master password' : e.message, 'error'); }
   };
-  pw.addEventListener('keydown', (e) => e.key === 'Enter' && go());
+  pw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      go();
+    }
+  });
   btn.addEventListener('click', go);
   app.append(screen('OKey', h('div', { class: 'vs-field' }, pw), btn,
     h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot password? Recover', onclick: renderRecover })));
@@ -193,9 +198,16 @@ function renderMain() {
   view.name = 'main';
   clear(app);
   const search = h('input', { class: 'vs-input', type: 'search', placeholder: 'Search…' });
+  const syncBtn = iconBtn(I.refresh, 'Sync now', async (ev) => {
+    syncBtn.classList.add('spinning');
+    await doSync();
+    syncBtn.classList.remove('spinning');
+  });
   const header = h('header', { class: 'okey-appbar vs-glass' },
     h('div', { class: 'okey-logo' }, '🔑 OKey'),
-    iconBtn(I.gear, 'Settings', renderSettings));
+    h('div', { style: 'display:flex;gap:8px;align-items:center' },
+      syncBtn,
+      iconBtn(I.gear, 'Settings', renderSettings)));
   const tabs = h('div', { class: 'okey-tabs' },
     ...['all', 'password', 'totp', 'favorites'].map((t) => h('button', { class: 'okey-tab', 'aria-selected': String(view.tab === t), text: { all: 'All', password: 'Logins', totp: 'Auth', favorites: '★' }[t], onclick: () => { view.tab = t; renderMain(); } })));
   const body = h('main', { class: 'okey-body' });
@@ -240,6 +252,7 @@ function renderDetail(id) {
   if (e.password) fields.append(pwField(e.password));
   if (e.totpSecret) fields.append(totpField(e.totpSecret));
   if (e.domain) fields.append(field('Website', e.domain, true));
+  if (e.folder) fields.append(field('Folder', e.folder, false));
   if (e.notes) fields.append(field('Notes', e.notes, false));
   (e.customFields || []).forEach((f) => fields.append(field(f.label, f.value, true)));
   app.append(h('div', { class: 'okey-view' },
@@ -280,10 +293,20 @@ function totpField(secret) {
 function renderEdit(id) {
   clearInterval(totpTimer);
   const editing = !!id;
-  const e = editing ? vault.getEntry(id) : { siteName: '', domain: '', username: '', password: '', totpSecret: '', notes: '', tags: [], customFields: [], entryType: ENTRY_TYPES.PASSWORD };
+  const e = editing ? vault.getEntry(id) : { siteName: '', domain: '', folder: '', username: '', password: '', totpSecret: '', notes: '', tags: [], customFields: [], entryType: ENTRY_TYPES.PASSWORD };
   clear(app);
   const siteName = inp('Site name', e.siteName, true, 'e.g. GitHub');
   const domain = inp('Domain', e.domain, true, 'github.com');
+  const folder = inp('Folder', e.folder, false, 'e.g. Work, Personal');
+  folder.input.setAttribute('list', 'okey-folders-list');
+  const datalist = h('datalist', { id: 'okey-folders-list' });
+  folder.field.append(datalist);
+  sync.getFolders().then((folders) => {
+    folders.forEach((fld) => {
+      datalist.append(h('option', { value: fld }));
+    });
+  }).catch((err) => console.error("Error loading folders datalist", err));
+
   const username = inp('Username / email', e.username, false);
   const pw = h('input', { class: 'vs-input', value: e.password, placeholder: 'Password' });
   const gen = iconBtn(I.refresh, 'Generate', () => { pw.value = generatePassword(settings.passwordGeneratorDefaults); });
@@ -296,6 +319,7 @@ function renderEdit(id) {
   save.addEventListener('click', async () => {
     const data = { siteName: siteName.value.trim(), domain: normalizeDomain(domain.value.trim()), username: username.value.trim(),
       password: pw.value, totpSecret: totp.value.replace(/\s+/g, ''), notes: notes.value,
+      folder: folder.value.trim(),
       tags: (tags.value || '').split(',').map((x) => x.trim()).filter(Boolean),
       customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({ label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
       entryType: totp.value.trim() && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD };
@@ -305,7 +329,7 @@ function renderEdit(id) {
     catch (err) { toast(err.message, 'error'); }
   });
   app.append(h('div', { class: 'okey-view' }, appbar(editing ? 'Edit item' : 'Add item', editing ? () => renderDetail(id) : renderMain),
-    siteName.field, domain.field, username.field,
+    siteName.field, domain.field, folder.field, username.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Password' }), h('div', { class: 'vs-input-group' }, pw, h('div', { class: 'vs-input-affix' }, gen))),
     totp.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Notes', h('span', { class: 'vs-optional', text: '(optional)' })), notes),
@@ -392,6 +416,8 @@ async function doSync() {
     const c = await store.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
     await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     const r = await sync.sync(vault);
+    await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    await sync.getFolders(true).catch(() => {});
     toast(`Synced · ↑${r.pushed} ↓${r.pulled}`, 'success');
   } catch (e) { toast(`Sync failed: ${e.message}`, 'error'); }
 }

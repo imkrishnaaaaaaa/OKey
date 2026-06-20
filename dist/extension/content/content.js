@@ -122,7 +122,9 @@
     FAVICON_CACHE: "okey_favicon_cache",
     BIOMETRIC_CRED_ID: "okey_biometric_cred_id",
     BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
-    SCHEMA_MIGRATED: "okey_schema_migrated"
+    SCHEMA_MIGRATED: "okey_schema_migrated",
+    CACHED_FOLDERS: "okey_cached_folders",
+    FOLDERS_CACHE_TIME: "okey_folders_cache_time"
   });
   var LEGACY_STORAGE_KEYS = Object.freeze({
     vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,

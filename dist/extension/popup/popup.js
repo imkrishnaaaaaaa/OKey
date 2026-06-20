@@ -121,7 +121,9 @@ var STORAGE_KEYS = Object.freeze({
   FAVICON_CACHE: "okey_favicon_cache",
   BIOMETRIC_CRED_ID: "okey_biometric_cred_id",
   BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
-  SCHEMA_MIGRATED: "okey_schema_migrated"
+  SCHEMA_MIGRATED: "okey_schema_migrated",
+  CACHED_FOLDERS: "okey_cached_folders",
+  FOLDERS_CACHE_TIME: "okey_folders_cache_time"
 });
 var LEGACY_STORAGE_KEYS = Object.freeze({
   vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,
@@ -3790,7 +3792,8 @@ var METADATA_FIELDS = Object.freeze([
   "isDeleted",
   "updatedAt",
   "displayOrder",
-  "isPinned"
+  "isPinned",
+  "folder"
 ]);
 var isString = (v) => typeof v === "string";
 var clampStr = (v, max) => isString(v) ? v.slice(0, max) : "";
@@ -3803,6 +3806,7 @@ function createEntry(data, genId, nowIso2) {
     siteName: clampStr(data.siteName, 200),
     nickname: clampStr(data.nickname, 200),
     entryType,
+    folder: clampStr(data.folder, 200),
     tags: sanitizeStringArray(data.tags, 30, 50),
     matchPatterns: sanitizeStringArray(data.matchPatterns, 20, 300),
     isFavorite: !!data.isFavorite,
@@ -3871,7 +3875,7 @@ function formatTimeAgo(isoString, nowMs = Date.now()) {
 }
 
 // src/core/vault.js
-var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned"];
+var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned", "folder"];
 var Vault = class {
   /** @param {import('./adapters.js').StorageAdapter} storage */
   constructor(storage) {
@@ -4280,7 +4284,8 @@ var Vault = class {
           isDeleted: rec.isDeleted,
           updatedAt: rec.updatedAt,
           displayOrder: rec.displayOrder,
-          isPinned: rec.isPinned
+          isPinned: rec.isPinned,
+          folder: rec.folder
         },
         generateUuid,
         nowIso
@@ -4383,15 +4388,25 @@ var SyncEngine = class {
     return sheets.find((s) => s.isActive) || sheets[0] || null;
   }
   async addProfile({ label: label2, appsScriptUrl, sheetId }) {
-    if (!/^https:\/\/script\.google\.com\//.test(appsScriptUrl || "")) {
+    const trimmedUrl = (appsScriptUrl || "").trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
       throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
     }
     const sheets = await this.getProfiles();
     if (sheets.length >= APP.MAX_SHEETS) throw new SyncError(`Maximum ${APP.MAX_SHEETS} vaults`, "MAX_SHEETS");
+    const trimmedLabel = (label2 || `Vault ${sheets.length + 1}`).trim();
+    const duplicateUrl = sheets.find((s) => s.appsScriptUrl.trim() === trimmedUrl);
+    if (duplicateUrl) {
+      throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+    }
+    const duplicateLabel = sheets.find((s) => s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+    if (duplicateLabel) {
+      throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+    }
     const profile = {
       id: generateUuid(),
-      label: (label2 || `Vault ${sheets.length + 1}`).slice(0, 60),
-      appsScriptUrl,
+      label: trimmedLabel.slice(0, 60),
+      appsScriptUrl: trimmedUrl,
       sheetId: sheetId || "",
       isActive: sheets.length === 0
     };
@@ -4403,8 +4418,21 @@ var SyncEngine = class {
     const sheets = await this.getProfiles();
     const p = sheets.find((s) => s.id === id);
     if (!p) throw new SyncError("Profile not found", "NOT_FOUND");
-    if (patch.label !== void 0) p.label = String(patch.label).slice(0, 60);
-    if (patch.appsScriptUrl !== void 0) p.appsScriptUrl = patch.appsScriptUrl;
+    if (patch.label !== void 0) {
+      const trimmedLabel = String(patch.label).trim();
+      const duplicateLabel = sheets.find((s) => s.id !== id && s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+      if (duplicateLabel) throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+      p.label = trimmedLabel.slice(0, 60);
+    }
+    if (patch.appsScriptUrl !== void 0) {
+      const trimmedUrl = String(patch.appsScriptUrl).trim();
+      if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+        throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
+      }
+      const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
+      if (duplicateUrl) throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+      p.appsScriptUrl = trimmedUrl;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
   }
@@ -4452,6 +4480,32 @@ var SyncEngine = class {
   /** Create/repair the Sheet tab structure. */
   async setupSheet() {
     return this._call("initVault", {});
+  }
+  /** Get or fetch unique folders list. */
+  async getFolders(force = false) {
+    const cached = await this.storage.get([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    const list = cached[STORAGE_KEYS.CACHED_FOLDERS] || [];
+    const time = cached[STORAGE_KEYS.FOLDERS_CACHE_TIME] || 0;
+    const now = Date.now();
+    const profile = await this.getActiveProfile();
+    if (!profile?.appsScriptUrl) {
+      return list;
+    }
+    if (force || !list.length || now - time > 24 * 60 * 60 * 1e3) {
+      try {
+        const result = await this._call("getFolders", {});
+        if (result && result.folders) {
+          await this.storage.set({
+            [STORAGE_KEYS.CACHED_FOLDERS]: result.folders,
+            [STORAGE_KEYS.FOLDERS_CACHE_TIME]: now
+          });
+          return result.folders;
+        }
+      } catch (e) {
+        console.error("Failed to fetch folders:", e);
+      }
+    }
+    return list;
   }
   /**
    * Push the (non-sensitive) key material so a new device can unlock from the
@@ -5070,6 +5124,14 @@ var totpTimer = null;
 var selectMode = false;
 var selected = /* @__PURE__ */ new Set();
 var lastActivityTouch = 0;
+var syncStatus = "idle";
+function updateSyncUI(status) {
+  syncStatus = status;
+  const dot = document.querySelector(".okey-sync-dot");
+  if (dot) {
+    dot.className = "okey-sync-dot " + (status === "idle" ? "" : status);
+  }
+}
 function h(tag2, props = {}, ...kids) {
   const e = document.createElement(tag2);
   for (const [k, v] of Object.entries(props)) {
@@ -5410,7 +5472,12 @@ function renderLocked({ overlay = false } = {}) {
       pw.select();
     }
   };
-  pw.addEventListener("keydown", (e) => e.key === "Enter" && submit());
+  pw.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
   btn.addEventListener("click", submit);
   const lockCard = h(
     "div",
@@ -5667,6 +5734,7 @@ function renderDetail(id) {
   fields.append(passwordField(entry.password));
   if (entry.totpSecret) fields.append(totpField(entry.totpSecret));
   if (entry.domain) fields.append(detailField("Website", entry.domain, true));
+  if (entry.folder) fields.append(detailField("Folder", entry.folder, false));
   if (entry.notes) fields.append(detailField("Notes", entry.notes, false));
   (entry.customFields || []).forEach((f) => fields.append(detailField(f.label, f.value, true)));
   if (entry.tags?.length) fields.append(detailField("Tags", entry.tags.join(", "), false));
@@ -5795,6 +5863,15 @@ function renderEdit(id, draft = null, scrollTop = 0) {
   const f = {};
   f.siteName = labeledInput("Site name", e.siteName, true, "e.g. GitHub");
   f.domain = labeledInput("Domain", e.domain, true, "e.g. github.com");
+  f.folder = labeledInput("Folder", e.folder, false, "e.g. Work, Personal");
+  f.folder.input.setAttribute("list", "okey-folders-list");
+  const datalist = h("datalist", { id: "okey-folders-list" });
+  f.folder.field.append(datalist);
+  sync.getFolders().then((folders) => {
+    folders.forEach((folder) => {
+      datalist.append(h("option", { value: folder }));
+    });
+  }).catch((err) => console.error("Error loading folders datalist", err));
   f.username = labeledInput("Username / email", e.username, false);
   const pwInput = h("input", { class: "vs-input", type: "text", value: e.password || "", placeholder: "Password" });
   const genBtn = iconBtn(ICONS.refresh, "Generate", () => {
@@ -5827,6 +5904,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
     notes: f.notes.value,
     tags: splitList(f.tags.value),
     matchPatterns: splitList(f.patterns.value),
+    folder: f.folder.value,
     customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({
       label: r.children[0].value,
       value: r.children[1].value,
@@ -5845,6 +5923,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
       notes: f.notes.value,
       tags: splitList(f.tags.value),
       matchPatterns: splitList(f.patterns.value),
+      folder: f.folder.value.trim(),
       customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({
         label: r.children[0].value.trim(),
         value: r.children[1].value,
@@ -5870,6 +5949,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
     viewHeader(editing ? "Edit item" : "Add item", editing ? () => renderDetail(id) : renderMain),
     f.siteName.field,
     f.domain.field,
+    f.folder.field,
     f.username.field,
     h("div", { class: "vs-field" }, label("Password"), h("div", { class: "vs-input-group" }, pwInput, h("div", { class: "vs-input-affix" }, genBtn))),
     f.totp.field,
@@ -6162,16 +6242,22 @@ async function doManualSync() {
   const active = await sync.getActiveProfile();
   if (!active) return toast("Add a vault sheet first", "error");
   toast("Syncing\u2026", "info");
+  updateSyncUI("syncing");
   try {
     const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
     await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     await sync.pushSettings(settings).catch(() => {
     });
     const r = await sync.sync(vault);
+    await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    await sync.getFolders(true).catch(() => {
+    });
     toast(`Synced \xB7 \u2191${r.pushed} \u2193${r.pulled}`, "success");
+    updateSyncUI("ok");
     renderMain();
   } catch (e) {
     toast(`Sync failed: ${e.message}`, "error");
+    updateSyncUI("err");
   }
 }
 var syncDebounce = null;
@@ -6183,8 +6269,15 @@ function scheduleSync() {
   }, 8e3);
 }
 async function maybeSyncOnUnlock() {
-  if (settings.autoSyncEnabled && await sync.getActiveProfile()) sync.sync(vault).catch(() => {
-  });
+  if (settings.autoSyncEnabled && await sync.getActiveProfile()) {
+    updateSyncUI("syncing");
+    sync.sync(vault).then(async () => {
+      updateSyncUI("ok");
+      await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+      await sync.getFolders(true).catch(() => {
+      });
+    }).catch(() => updateSyncUI("err"));
+  }
 }
 async function updateSettings(patch) {
   settings = { ...settings, ...patch };
@@ -6209,6 +6302,13 @@ function viewHeader(title, back) {
 }
 function renderFooter() {
   const syncLabel = h("span", { class: "vs-faint", text: "Never synced" });
+  const refreshBtn = iconBtn(ICONS.refresh, "Sync now", async (ev) => {
+    ev.stopPropagation();
+    refreshBtn.classList.add("spinning");
+    await doManualSync();
+    refreshBtn.classList.remove("spinning");
+  });
+  refreshBtn.classList.add("okey-footer-sync-btn");
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {
     const lastSync = s[STORAGE_KEYS.LAST_SYNC_AT];
     syncLabel.textContent = lastSync ? `Last synced: ${formatTimeAgo(lastSync)}` : "Never synced";
@@ -6216,10 +6316,11 @@ function renderFooter() {
   return h(
     "div",
     { class: "okey-footer vs-glass" },
-    h("span", { class: "okey-sync-dot" }),
+    h("span", { class: "okey-sync-dot" + (syncStatus && syncStatus !== "idle" ? " " + syncStatus : "") }),
     h("span", { text: `${vault.getEntries().length} items` }),
     h("div", { class: "vs-spacer" }),
-    syncLabel
+    syncLabel,
+    refreshBtn
   );
 }
 function label(text, optional) {

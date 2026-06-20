@@ -77,3 +77,13 @@
 .okey-setting { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--vs-border); }
 .okey-setting-main { flex: 1; }
 .okey-generator-output { font-family: var(--vs-mono); font-size: var(--vs-fs-lg); word-break: break-all; padding: 16px; background: var(--vs-bg-elev-2); border-radius: var(--vs-radius-md); min-height: 56px; }
+
+.spinning {
+  animation: okey-spin 1s linear infinite;
+  display: inline-block;
+}
+
+@keyframes okey-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

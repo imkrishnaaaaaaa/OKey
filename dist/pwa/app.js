@@ -121,7 +121,9 @@ var STORAGE_KEYS = Object.freeze({
   FAVICON_CACHE: "okey_favicon_cache",
   BIOMETRIC_CRED_ID: "okey_biometric_cred_id",
   BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
-  SCHEMA_MIGRATED: "okey_schema_migrated"
+  SCHEMA_MIGRATED: "okey_schema_migrated",
+  CACHED_FOLDERS: "okey_cached_folders",
+  FOLDERS_CACHE_TIME: "okey_folders_cache_time"
 });
 var LEGACY_STORAGE_KEYS = Object.freeze({
   vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,
@@ -3790,7 +3792,8 @@ var METADATA_FIELDS = Object.freeze([
   "isDeleted",
   "updatedAt",
   "displayOrder",
-  "isPinned"
+  "isPinned",
+  "folder"
 ]);
 var isString = (v) => typeof v === "string";
 var clampStr = (v, max) => isString(v) ? v.slice(0, max) : "";
@@ -3803,6 +3806,7 @@ function createEntry(data, genId, nowIso2) {
     siteName: clampStr(data.siteName, 200),
     nickname: clampStr(data.nickname, 200),
     entryType,
+    folder: clampStr(data.folder, 200),
     tags: sanitizeStringArray(data.tags, 30, 50),
     matchPatterns: sanitizeStringArray(data.matchPatterns, 20, 300),
     isFavorite: !!data.isFavorite,
@@ -3859,7 +3863,7 @@ function deepClone(obj) {
 }
 
 // src/core/vault.js
-var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned"];
+var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned", "folder"];
 var Vault = class {
   /** @param {import('./adapters.js').StorageAdapter} storage */
   constructor(storage) {
@@ -4268,7 +4272,8 @@ var Vault = class {
           isDeleted: rec.isDeleted,
           updatedAt: rec.updatedAt,
           displayOrder: rec.displayOrder,
-          isPinned: rec.isPinned
+          isPinned: rec.isPinned,
+          folder: rec.folder
         },
         generateUuid,
         nowIso
@@ -4371,15 +4376,25 @@ var SyncEngine = class {
     return sheets.find((s) => s.isActive) || sheets[0] || null;
   }
   async addProfile({ label, appsScriptUrl, sheetId }) {
-    if (!/^https:\/\/script\.google\.com\//.test(appsScriptUrl || "")) {
+    const trimmedUrl = (appsScriptUrl || "").trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
       throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
     }
     const sheets = await this.getProfiles();
     if (sheets.length >= APP.MAX_SHEETS) throw new SyncError(`Maximum ${APP.MAX_SHEETS} vaults`, "MAX_SHEETS");
+    const trimmedLabel = (label || `Vault ${sheets.length + 1}`).trim();
+    const duplicateUrl = sheets.find((s) => s.appsScriptUrl.trim() === trimmedUrl);
+    if (duplicateUrl) {
+      throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+    }
+    const duplicateLabel = sheets.find((s) => s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+    if (duplicateLabel) {
+      throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+    }
     const profile = {
       id: generateUuid(),
-      label: (label || `Vault ${sheets.length + 1}`).slice(0, 60),
-      appsScriptUrl,
+      label: trimmedLabel.slice(0, 60),
+      appsScriptUrl: trimmedUrl,
       sheetId: sheetId || "",
       isActive: sheets.length === 0
     };
@@ -4391,8 +4406,21 @@ var SyncEngine = class {
     const sheets = await this.getProfiles();
     const p = sheets.find((s) => s.id === id);
     if (!p) throw new SyncError("Profile not found", "NOT_FOUND");
-    if (patch.label !== void 0) p.label = String(patch.label).slice(0, 60);
-    if (patch.appsScriptUrl !== void 0) p.appsScriptUrl = patch.appsScriptUrl;
+    if (patch.label !== void 0) {
+      const trimmedLabel = String(patch.label).trim();
+      const duplicateLabel = sheets.find((s) => s.id !== id && s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+      if (duplicateLabel) throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+      p.label = trimmedLabel.slice(0, 60);
+    }
+    if (patch.appsScriptUrl !== void 0) {
+      const trimmedUrl = String(patch.appsScriptUrl).trim();
+      if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+        throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
+      }
+      const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
+      if (duplicateUrl) throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+      p.appsScriptUrl = trimmedUrl;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
   }
@@ -4440,6 +4468,32 @@ var SyncEngine = class {
   /** Create/repair the Sheet tab structure. */
   async setupSheet() {
     return this._call("initVault", {});
+  }
+  /** Get or fetch unique folders list. */
+  async getFolders(force = false) {
+    const cached = await this.storage.get([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    const list2 = cached[STORAGE_KEYS.CACHED_FOLDERS] || [];
+    const time = cached[STORAGE_KEYS.FOLDERS_CACHE_TIME] || 0;
+    const now = Date.now();
+    const profile = await this.getActiveProfile();
+    if (!profile?.appsScriptUrl) {
+      return list2;
+    }
+    if (force || !list2.length || now - time > 24 * 60 * 60 * 1e3) {
+      try {
+        const result = await this._call("getFolders", {});
+        if (result && result.folders) {
+          await this.storage.set({
+            [STORAGE_KEYS.CACHED_FOLDERS]: result.folders,
+            [STORAGE_KEYS.FOLDERS_CACHE_TIME]: now
+          });
+          return result.folders;
+        }
+      } catch (e) {
+        console.error("Failed to fetch folders:", e);
+      }
+    }
+    return list2;
   }
   /**
    * Push the (non-sensitive) key material so a new device can unlock from the
@@ -5147,7 +5201,12 @@ function renderLocked() {
       toast(e.code === "DECRYPTION_FAILED" ? "Incorrect master password" : e.message, "error");
     }
   };
-  pw.addEventListener("keydown", (e) => e.key === "Enter" && go());
+  pw.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      go();
+    }
+  });
   btn.addEventListener("click", go);
   app.append(screen(
     "OKey",
@@ -5188,11 +5247,21 @@ function renderMain() {
   view.name = "main";
   clear(app);
   const search = h("input", { class: "vs-input", type: "search", placeholder: "Search\u2026" });
+  const syncBtn = iconBtn(I.refresh, "Sync now", async (ev) => {
+    syncBtn.classList.add("spinning");
+    await doSync();
+    syncBtn.classList.remove("spinning");
+  });
   const header = h(
     "header",
     { class: "okey-appbar vs-glass" },
     h("div", { class: "okey-logo" }, "\u{1F511} OKey"),
-    iconBtn(I.gear, "Settings", renderSettings)
+    h(
+      "div",
+      { style: "display:flex;gap:8px;align-items:center" },
+      syncBtn,
+      iconBtn(I.gear, "Settings", renderSettings)
+    )
   );
   const tabs = h(
     "div",
@@ -5253,6 +5322,7 @@ function renderDetail(id) {
   if (e.password) fields.append(pwField(e.password));
   if (e.totpSecret) fields.append(totpField(e.totpSecret));
   if (e.domain) fields.append(field("Website", e.domain, true));
+  if (e.folder) fields.append(field("Folder", e.folder, false));
   if (e.notes) fields.append(field("Notes", e.notes, false));
   (e.customFields || []).forEach((f) => fields.append(field(f.label, f.value, true)));
   app.append(h(
@@ -5345,10 +5415,19 @@ function totpField(secret) {
 function renderEdit(id) {
   clearInterval(totpTimer);
   const editing = !!id;
-  const e = editing ? vault.getEntry(id) : { siteName: "", domain: "", username: "", password: "", totpSecret: "", notes: "", tags: [], customFields: [], entryType: ENTRY_TYPES.PASSWORD };
+  const e = editing ? vault.getEntry(id) : { siteName: "", domain: "", folder: "", username: "", password: "", totpSecret: "", notes: "", tags: [], customFields: [], entryType: ENTRY_TYPES.PASSWORD };
   clear(app);
   const siteName = inp("Site name", e.siteName, true, "e.g. GitHub");
   const domain = inp("Domain", e.domain, true, "github.com");
+  const folder = inp("Folder", e.folder, false, "e.g. Work, Personal");
+  folder.input.setAttribute("list", "okey-folders-list");
+  const datalist = h("datalist", { id: "okey-folders-list" });
+  folder.field.append(datalist);
+  sync.getFolders().then((folders) => {
+    folders.forEach((fld) => {
+      datalist.append(h("option", { value: fld }));
+    });
+  }).catch((err) => console.error("Error loading folders datalist", err));
   const username = inp("Username / email", e.username, false);
   const pw = h("input", { class: "vs-input", value: e.password, placeholder: "Password" });
   const gen = iconBtn(I.refresh, "Generate", () => {
@@ -5369,6 +5448,7 @@ function renderEdit(id) {
       password: pw.value,
       totpSecret: totp.value.replace(/\s+/g, ""),
       notes: notes.value,
+      folder: folder.value.trim(),
       tags: (tags.value || "").split(",").map((x) => x.trim()).filter(Boolean),
       customFields: [...customWrap.querySelectorAll(".okey-custom-row")].map((r) => ({ label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
       entryType: totp.value.trim() && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD
@@ -5391,6 +5471,7 @@ function renderEdit(id) {
     appbar(editing ? "Edit item" : "Add item", editing ? () => renderDetail(id) : renderMain),
     siteName.field,
     domain.field,
+    folder.field,
     username.field,
     h("div", { class: "vs-field" }, h("label", { class: "vs-label", text: "Password" }), h("div", { class: "vs-input-group" }, pw, h("div", { class: "vs-input-affix" }, gen))),
     totp.field,
@@ -5541,6 +5622,9 @@ async function doSync() {
     const c = await store.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
     await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     const r = await sync.sync(vault);
+    await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    await sync.getFolders(true).catch(() => {
+    });
     toast(`Synced \xB7 \u2191${r.pushed} \u2193${r.pulled}`, "success");
   } catch (e) {
     toast(`Sync failed: ${e.message}`, "error");

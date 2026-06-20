@@ -601,6 +601,7 @@ function renderDetail(id) {
   fields.append(passwordField(entry.password));
   if (entry.totpSecret) fields.append(totpField(entry.totpSecret));
   if (entry.domain) fields.append(detailField('Website', entry.domain, true));
+  if (entry.folder) fields.append(detailField('Folder', entry.folder, false));
   if (entry.notes) fields.append(detailField('Notes', entry.notes, false));
   (entry.customFields || []).forEach((f) => fields.append(detailField(f.label, f.value, true)));
   if (entry.tags?.length) fields.append(detailField('Tags', entry.tags.join(', '), false));
@@ -686,6 +687,16 @@ function renderEdit(id, draft = null, scrollTop = 0) {
   const f = {};
   f.siteName = labeledInput('Site name', e.siteName, true, 'e.g. GitHub');
   f.domain = labeledInput('Domain', e.domain, true, 'e.g. github.com'); // one of site/domain required (#4)
+  f.folder = labeledInput('Folder', e.folder, false, 'e.g. Work, Personal');
+  f.folder.input.setAttribute('list', 'okey-folders-list');
+  const datalist = h('datalist', { id: 'okey-folders-list' });
+  f.folder.field.append(datalist);
+  sync.getFolders().then((folders) => {
+    folders.forEach((folder) => {
+      datalist.append(h('option', { value: folder }));
+    });
+  }).catch((err) => console.error("Error loading folders datalist", err));
+
   f.username = labeledInput('Username / email', e.username, false);
   const pwInput = h('input', { class: 'vs-input', type: 'text', value: e.password || '', placeholder: 'Password' });
   const genBtn = iconBtn(ICONS.refresh, 'Generate', () => { pwInput.value = generatePassword(settings.passwordGeneratorDefaults); toggleGen(); saveDraft(); });
@@ -710,6 +721,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
     notes: f.notes.value,
     tags: splitList(f.tags.value),
     matchPatterns: splitList(f.patterns.value),
+    folder: f.folder.value,
     customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({
       label: r.children[0].value, value: r.children[1].value, hidden: false,
     })),
@@ -722,6 +734,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
       siteName: f.siteName.value.trim(), domain: normalizeDomain(f.domain.value.trim()),
       username: f.username.value.trim(), password: pwInput.value, totpSecret: f.totp.value.replace(/\s+/g, ''),
       notes: f.notes.value, tags: splitList(f.tags.value), matchPatterns: splitList(f.patterns.value),
+      folder: f.folder.value.trim(),
       customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({
         label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
       entryType: f.totp.value.trim() && !pwInput.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD,
@@ -737,7 +750,7 @@ function renderEdit(id, draft = null, scrollTop = 0) {
 
   const editView = h('div', { class: 'okey-view' },
     viewHeader(editing ? 'Edit item' : 'Add item', editing ? () => renderDetail(id) : renderMain),
-    f.siteName.field, f.domain.field, f.username.field,
+    f.siteName.field, f.domain.field, f.folder.field, f.username.field,
     h('div', { class: 'vs-field' }, label('Password'), h('div', { class: 'vs-input-group' }, pwInput, h('div', { class: 'vs-input-affix' }, genBtn))),
     f.totp.field, f.patterns.field,
     h('div', { class: 'vs-field' }, label('Notes', true), f.notes),
@@ -948,15 +961,23 @@ async function doManualSync() {
   const active = await sync.getActiveProfile();
   if (!active) return toast('Add a vault sheet first', 'error');
   toast('Syncing…', 'info');
+  updateSyncUI('syncing');
   try {
     // ensure key material is on the sheet for device migration
     const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
     await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     await sync.pushSettings(settings).catch(() => {});
     const r = await sync.sync(vault);
+    // Sync Cache Invalidation
+    await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    await sync.getFolders(true).catch(() => {});
     toast(`Synced · ↑${r.pushed} ↓${r.pulled}`, 'success');
+    updateSyncUI('ok');
     renderMain();
-  } catch (e) { toast(`Sync failed: ${e.message}`, 'error'); }
+  } catch (e) {
+    toast(`Sync failed: ${e.message}`, 'error');
+    updateSyncUI('err');
+  }
 }
 
 let syncDebounce = null;
@@ -964,7 +985,18 @@ function scheduleSync() {
   clearTimeout(syncDebounce);
   syncDebounce = setTimeout(async () => { if (await sync.getActiveProfile()) sync.sync(vault).catch(() => {}); }, 8000);
 }
-async function maybeSyncOnUnlock() { if (settings.autoSyncEnabled && (await sync.getActiveProfile())) sync.sync(vault).catch(() => {}); }
+async function maybeSyncOnUnlock() {
+  if (settings.autoSyncEnabled && (await sync.getActiveProfile())) {
+    updateSyncUI('syncing');
+    sync.sync(vault)
+      .then(async () => {
+        updateSyncUI('ok');
+        await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+        await sync.getFolders(true).catch(() => {});
+      })
+      .catch(() => updateSyncUI('err'));
+  }
+}
 
 async function updateSettings(patch) {
   settings = { ...settings, ...patch };
@@ -982,13 +1014,23 @@ function iconBtn(svg, title, onclick) { return h('button', { class: 'vs-icon-btn
 function viewHeader(title, back) { return h('div', { class: 'okey-view-header vs-glass' }, iconBtn(ICONS.back, 'Back', back), h('div', { class: 'okey-view-title', text: title })); }
 function renderFooter() {
   const syncLabel = h('span', { class: 'vs-faint', text: 'Never synced' });
+  const refreshBtn = iconBtn(ICONS.refresh, 'Sync now', async (ev) => {
+    ev.stopPropagation();
+    refreshBtn.classList.add('spinning');
+    await doManualSync();
+    refreshBtn.classList.remove('spinning');
+  });
+  refreshBtn.classList.add('okey-footer-sync-btn');
+
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {
     const lastSync = s[STORAGE_KEYS.LAST_SYNC_AT];
     syncLabel.textContent = lastSync ? `Last synced: ${formatTimeAgo(lastSync)}` : 'Never synced';
   });
-  return h('div', { class: 'okey-footer vs-glass' }, h('span', { class: 'okey-sync-dot' }),
+  return h('div', { class: 'okey-footer vs-glass' },
+    h('span', { class: 'okey-sync-dot' + (syncStatus && syncStatus !== 'idle' ? ' ' + syncStatus : '') }),
     h('span', { text: `${vault.getEntries().length} items` }), h('div', { class: 'vs-spacer' }),
-    syncLabel);
+    syncLabel,
+    refreshBtn);
 }
 function label(text, optional) { return h('label', { class: 'vs-label' }, text, optional ? h('span', { class: 'vs-optional', text: '(optional)' }) : (text ? h('span', { class: 'vs-required', text: ' *' }) : null)); }
 function labeledInput(lbl, value, required, placeholder) {

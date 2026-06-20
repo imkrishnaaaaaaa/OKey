@@ -154,6 +154,11 @@ export class SyncEngine {
     const time = cached[STORAGE_KEYS.FOLDERS_CACHE_TIME] || 0;
     const now = Date.now();
 
+    const profile = await this.getActiveProfile();
+    if (!profile?.appsScriptUrl) {
+      return list;
+    }
+
     // Refresh if force is true, list is empty, or cache is older than 24 hours (86400000 ms)
     if (force || !list.length || (now - time) > 24 * 60 * 60 * 1000) {
       try {

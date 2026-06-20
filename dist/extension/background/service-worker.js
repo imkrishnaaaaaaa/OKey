@@ -144,7 +144,9 @@ var STORAGE_KEYS = Object.freeze({
   FAVICON_CACHE: "okey_favicon_cache",
   BIOMETRIC_CRED_ID: "okey_biometric_cred_id",
   BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
-  SCHEMA_MIGRATED: "okey_schema_migrated"
+  SCHEMA_MIGRATED: "okey_schema_migrated",
+  CACHED_FOLDERS: "okey_cached_folders",
+  FOLDERS_CACHE_TIME: "okey_folders_cache_time"
 });
 var LEGACY_STORAGE_KEYS = Object.freeze({
   vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,
@@ -3813,7 +3815,8 @@ var METADATA_FIELDS = Object.freeze([
   "isDeleted",
   "updatedAt",
   "displayOrder",
-  "isPinned"
+  "isPinned",
+  "folder"
 ]);
 var isString = (v) => typeof v === "string";
 var clampStr = (v, max) => isString(v) ? v.slice(0, max) : "";
@@ -3826,6 +3829,7 @@ function createEntry(data, genId, nowIso2) {
     siteName: clampStr(data.siteName, 200),
     nickname: clampStr(data.nickname, 200),
     entryType,
+    folder: clampStr(data.folder, 200),
     tags: sanitizeStringArray(data.tags, 30, 50),
     matchPatterns: sanitizeStringArray(data.matchPatterns, 20, 300),
     isFavorite: !!data.isFavorite,
@@ -3882,7 +3886,7 @@ function deepClone(obj) {
 }
 
 // src/core/vault.js
-var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned"];
+var META_KEYS = ["id", "domain", "entryType", "version", "isDeleted", "updatedAt", "displayOrder", "isPinned", "folder"];
 var Vault = class {
   /** @param {import('./adapters.js').StorageAdapter} storage */
   constructor(storage) {
@@ -4291,7 +4295,8 @@ var Vault = class {
           isDeleted: rec.isDeleted,
           updatedAt: rec.updatedAt,
           displayOrder: rec.displayOrder,
-          isPinned: rec.isPinned
+          isPinned: rec.isPinned,
+          folder: rec.folder
         },
         generateUuid,
         nowIso
@@ -4394,15 +4399,25 @@ var SyncEngine = class {
     return sheets.find((s) => s.isActive) || sheets[0] || null;
   }
   async addProfile({ label, appsScriptUrl, sheetId }) {
-    if (!/^https:\/\/script\.google\.com\//.test(appsScriptUrl || "")) {
+    const trimmedUrl = (appsScriptUrl || "").trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
       throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
     }
     const sheets = await this.getProfiles();
     if (sheets.length >= APP.MAX_SHEETS) throw new SyncError(`Maximum ${APP.MAX_SHEETS} vaults`, "MAX_SHEETS");
+    const trimmedLabel = (label || `Vault ${sheets.length + 1}`).trim();
+    const duplicateUrl = sheets.find((s) => s.appsScriptUrl.trim() === trimmedUrl);
+    if (duplicateUrl) {
+      throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+    }
+    const duplicateLabel = sheets.find((s) => s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+    if (duplicateLabel) {
+      throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+    }
     const profile = {
       id: generateUuid(),
-      label: (label || `Vault ${sheets.length + 1}`).slice(0, 60),
-      appsScriptUrl,
+      label: trimmedLabel.slice(0, 60),
+      appsScriptUrl: trimmedUrl,
       sheetId: sheetId || "",
       isActive: sheets.length === 0
     };
@@ -4414,8 +4429,21 @@ var SyncEngine = class {
     const sheets = await this.getProfiles();
     const p = sheets.find((s) => s.id === id);
     if (!p) throw new SyncError("Profile not found", "NOT_FOUND");
-    if (patch.label !== void 0) p.label = String(patch.label).slice(0, 60);
-    if (patch.appsScriptUrl !== void 0) p.appsScriptUrl = patch.appsScriptUrl;
+    if (patch.label !== void 0) {
+      const trimmedLabel = String(patch.label).trim();
+      const duplicateLabel = sheets.find((s) => s.id !== id && s.label.trim().toLowerCase() === trimmedLabel.toLowerCase());
+      if (duplicateLabel) throw new SyncError("A vault with this name already exists", "DUPLICATE_LABEL");
+      p.label = trimmedLabel.slice(0, 60);
+    }
+    if (patch.appsScriptUrl !== void 0) {
+      const trimmedUrl = String(patch.appsScriptUrl).trim();
+      if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+        throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
+      }
+      const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
+      if (duplicateUrl) throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
+      p.appsScriptUrl = trimmedUrl;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
   }
@@ -4463,6 +4491,32 @@ var SyncEngine = class {
   /** Create/repair the Sheet tab structure. */
   async setupSheet() {
     return this._call("initVault", {});
+  }
+  /** Get or fetch unique folders list. */
+  async getFolders(force = false) {
+    const cached = await this.storage.get([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
+    const list = cached[STORAGE_KEYS.CACHED_FOLDERS] || [];
+    const time = cached[STORAGE_KEYS.FOLDERS_CACHE_TIME] || 0;
+    const now = Date.now();
+    const profile = await this.getActiveProfile();
+    if (!profile?.appsScriptUrl) {
+      return list;
+    }
+    if (force || !list.length || now - time > 24 * 60 * 60 * 1e3) {
+      try {
+        const result = await this._call("getFolders", {});
+        if (result && result.folders) {
+          await this.storage.set({
+            [STORAGE_KEYS.CACHED_FOLDERS]: result.folders,
+            [STORAGE_KEYS.FOLDERS_CACHE_TIME]: now
+          });
+          return result.folders;
+        }
+      } catch (e) {
+        console.error("Failed to fetch folders:", e);
+      }
+    }
+    return list;
   }
   /**
    * Push the (non-sensitive) key material so a new device can unlock from the

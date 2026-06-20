@@ -17,7 +17,7 @@ import {
 import { generateTOTP, isValidTotpSecret } from '../../core/totp.js';
 import { matchDomain, extractDomain, normalizeDomain, getDisplayDomain } from '../../core/domain-matcher.js';
 import { formatTimeAgo } from '../../core/util.js';
-import { DEFAULT_SETTINGS, STORAGE_KEYS, ENTRY_TYPES, FAVICON, SECURITY } from '../../core/constants.js';
+import { DEFAULT_SETTINGS, STORAGE_KEYS, LEGACY_STORAGE_KEYS, ENTRY_TYPES, FAVICON, SECURITY } from '../../core/constants.js';
 import * as IE from '../../core/import-export.js';
 import { ChromeStorageAdapter, chromeNetwork } from '../lib/platform.js';
 import { MSG } from '../lib/messages.js';
@@ -211,6 +211,7 @@ async function boot() {
       dek.fill(0);
       const saved = await getViewState();
       if (saved?.tab) view.tab = saved.tab;
+      showFloatingLock();
       return restoreSavedView(saved); // feedback #1, #15 (no "unlocked" toast), #25
     } catch { /* fall through to locked */ }
   }
@@ -227,6 +228,7 @@ function applyTheme(theme) {
 // ============================ SETUP ============================
 function renderSetup() {
   view.name = 'setup';
+  hideFloatingLock();
   clear(app);
   app.append(h('div', { class: 'okey-view okey-setup-choice' },
     brandHeader(),
@@ -366,6 +368,7 @@ function renderRecoveryReveal(mnemonic, done) {
 function renderLocked({ overlay = false } = {}) {
   clearInterval(totpTimer);
   document.getElementById('okey-lock-overlay')?.remove();
+  hideFloatingLock();
   const useOverlay = overlay && app.childElementCount > 0;
   const pw = h('input', { class: 'vs-input okey-lock-input', type: 'password', placeholder: 'Master password', autofocus: true });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Unlock' });
@@ -375,6 +378,7 @@ function renderLocked({ overlay = false } = {}) {
     try {
       await vault.unlock(pw.value);
       await cacheDek(vault.exportDek(), settings.autoLockTimeout);
+      showFloatingLock();
       const overlayEl = document.getElementById('okey-lock-overlay');
       if (overlayEl) {
         overlayEl.remove();
@@ -401,10 +405,22 @@ function renderLocked({ overlay = false } = {}) {
     h('div', { class: 'vs-field' }, pw),
     btn,
     h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot password? Use recovery key', onclick: renderRecover }),
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px;color:var(--vs-danger)', text: 'Reset vault & start fresh', onclick: handleStartFresh }),
   );
   if (useOverlay) document.body.append(h('div', { class: 'okey-lock-overlay', id: 'okey-lock-overlay' }, lockCard));
   else { clear(app); app.append(lockCard); }
   requestAnimationFrame(() => pw.focus());
+}
+
+async function handleStartFresh() {
+  if (confirm('Warning: This will permanently delete all saved passwords and configuration on this device. (This does not delete your Google Sheets data, and you can reconnect later.) Are you sure you want to start fresh?')) {
+    vault.lock();
+    await clearSession();
+    const keys = [...Object.values(STORAGE_KEYS), ...Object.keys(LEGACY_STORAGE_KEYS)];
+    await local.remove(keys);
+    toast('Vault reset successfully', 'success');
+    renderSetup();
+  }
 }
 
 // ============================ RECOVER ============================
@@ -878,6 +894,7 @@ async function renderSettings(scrollTop = 0) {
 
     settingsGroup('Security',
       autoLock, clip,
+      h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: 'Change master password' })), h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: 'Change', onclick: changeMasterPasswordModal })),
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: 'Theme' })), themeSel)),
 
     settingsGroup('Connected Sheets',
@@ -919,6 +936,53 @@ function viewRecovery() {
       } catch { toast('Incorrect master password', 'error'); }
     } }),
   ]);
+}
+
+function changeMasterPasswordModal() {
+  const currentPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Current master password', autofocus: true });
+  const newPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'New master password' });
+  const confirmNewPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Confirm new master password' });
+  const meter = strengthMeter();
+  newPw.addEventListener('input', () => meter.update(newPw.value));
+  const submitBtn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Change Password' });
+
+  submitBtn.addEventListener('click', async () => {
+    if (newPw.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
+      return toast(`New password must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} characters`, 'error');
+    }
+    if (newPw.value !== confirmNewPw.value) {
+      return toast('New passwords do not match', 'error');
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Updating…';
+
+    try {
+      const probe = new Vault(local);
+      await probe.unlock(currentPw.value);
+      probe.lock();
+
+      await vault.changeMasterPassword(newPw.value);
+      await cacheDek(vault.exportDek(), settings.autoLockTimeout);
+
+      toast('Master password changed successfully', 'success');
+      closeModal();
+      await doManualSync();
+    } catch (e) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Change Password';
+      toast(e.code === 'DECRYPTION_FAILED' ? 'Incorrect current master password' : e.message, 'error');
+    }
+  });
+
+  modal('Change Master Password', [
+    h('div', { class: 'vs-field' }, label('Current Password'), currentPw),
+    h('div', { class: 'vs-field' }, label('New Password'), newPw, meter.el),
+    h('div', { class: 'vs-field' }, label('Confirm New Password'), confirmNewPw),
+    submitBtn
+  ]);
+
+  requestAnimationFrame(() => currentPw.focus());
 }
 
 // ============================ helpers: modals, inputs ============================
@@ -999,7 +1063,7 @@ async function doManualSync() {
     // Sync Cache Invalidation
     await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {});
-    toast(`Synced · ↑${r.pushed} ↓${r.pulled}`, 'success');
+    toast(`Synced · ↑${r.pushed} ↓${r.pulled} (${vault.getEntries().length})`, 'success');
     updateSyncUI('ok');
     renderMain();
   } catch (e) {
@@ -1089,6 +1153,27 @@ function download(name, text) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
   const a = h('a', { href: url, download: name }); document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function showFloatingLock() {
+  if (document.getElementById('okey-lock-fab')) return;
+  const lockBtn = h('button', {
+    id: 'okey-lock-fab',
+    class: 'okey-lock-fab',
+    title: 'Lock now',
+    html: ICONS.logo,
+    onclick: async () => {
+      await clearSession();
+      vault.lock();
+      renderLocked();
+      window.close();
+    }
+  });
+  document.body.append(lockBtn);
+}
+
+function hideFloatingLock() {
+  document.getElementById('okey-lock-fab')?.remove();
 }
 
 boot();

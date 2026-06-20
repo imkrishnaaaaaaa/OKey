@@ -67,9 +67,13 @@ export class SyncEngine {
       appsScriptUrl: trimmedUrl,
       sheetId: sheetId || '',
       isActive: sheets.length === 0,
+      lastSyncAt: EPOCH,
     };
     sheets.push(profile);
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+    if (profile.isActive) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+    }
     return profile;
   }
 
@@ -90,7 +94,13 @@ export class SyncEngine {
       }
       const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
       if (duplicateUrl) throw new SyncError('A vault with this Apps Script URL already exists', 'DUPLICATE_URL');
-      p.appsScriptUrl = trimmedUrl;
+      if (p.appsScriptUrl !== trimmedUrl) {
+        p.appsScriptUrl = trimmedUrl;
+        p.lastSyncAt = EPOCH;
+        if (p.isActive) {
+          await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+        }
+      }
     }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
@@ -100,14 +110,26 @@ export class SyncEngine {
     let sheets = await this.getProfiles();
     const wasActive = sheets.find((s) => s.id === id)?.isActive;
     sheets = sheets.filter((s) => s.id !== id);
-    if (wasActive && sheets.length) sheets[0].isActive = true;
+    if (wasActive && sheets.length) {
+      sheets[0].isActive = true;
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: sheets[0].lastSyncAt || EPOCH });
+    } else if (wasActive && !sheets.length) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
   }
 
   async switchProfile(id) {
     const sheets = await this.getProfiles();
-    for (const s of sheets) s.isActive = s.id === id;
+    let activeProfile = null;
+    for (const s of sheets) {
+      s.isActive = s.id === id;
+      if (s.isActive) activeProfile = s;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+    if (activeProfile) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: activeProfile.lastSyncAt || EPOCH });
+    }
   }
 
   // ---- Remote calls ----
@@ -216,7 +238,9 @@ export class SyncEngine {
    * @returns {Promise<{ pushed:number, pulled:number, conflicts:number }>}
    */
   async sync(vault) {
-    const { [STORAGE_KEYS.LAST_SYNC_AT]: lastSyncAt = EPOCH } = await this.storage.get(STORAGE_KEYS.LAST_SYNC_AT);
+    const profile = await this.getActiveProfile();
+    const { [STORAGE_KEYS.LAST_SYNC_AT]: globalLastSyncAt = EPOCH } = await this.storage.get(STORAGE_KEYS.LAST_SYNC_AT);
+    const lastSyncAt = profile ? (profile.lastSyncAt || EPOCH) : globalLastSyncAt;
     const records = await vault.exportRecords();
     const modified = records.filter((r) => (r.updatedAt || EPOCH) > lastSyncAt);
 
@@ -230,7 +254,18 @@ export class SyncEngine {
 
     const pulled = result.updatedEntries || [];
     const { applied } = await vault.mergeRemoteRecords(pulled);
-    await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: result.serverTimestamp || nowIso() });
+    
+    const nextSyncAt = result.serverTimestamp || nowIso();
+    if (profile) {
+      profile.lastSyncAt = nextSyncAt;
+      const sheets = await this.getProfiles();
+      const idx = sheets.findIndex((s) => s.id === profile.id);
+      if (idx !== -1) {
+        sheets[idx] = profile;
+        await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+      }
+    }
+    await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: nextSyncAt });
     return { pushed: modified.length, pulled: applied, conflicts: (result.conflicts || []).length };
   }
 

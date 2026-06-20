@@ -4396,10 +4396,14 @@ var SyncEngine = class {
       label: trimmedLabel.slice(0, 60),
       appsScriptUrl: trimmedUrl,
       sheetId: sheetId || "",
-      isActive: sheets.length === 0
+      isActive: sheets.length === 0,
+      lastSyncAt: EPOCH
     };
     sheets.push(profile);
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+    if (profile.isActive) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+    }
     return profile;
   }
   async updateProfile(id, patch) {
@@ -4419,7 +4423,13 @@ var SyncEngine = class {
       }
       const duplicateUrl = sheets.find((s) => s.id !== id && s.appsScriptUrl.trim() === trimmedUrl);
       if (duplicateUrl) throw new SyncError("A vault with this Apps Script URL already exists", "DUPLICATE_URL");
-      p.appsScriptUrl = trimmedUrl;
+      if (p.appsScriptUrl !== trimmedUrl) {
+        p.appsScriptUrl = trimmedUrl;
+        p.lastSyncAt = EPOCH;
+        if (p.isActive) {
+          await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+        }
+      }
     }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
     return p;
@@ -4428,13 +4438,25 @@ var SyncEngine = class {
     let sheets = await this.getProfiles();
     const wasActive = sheets.find((s) => s.id === id)?.isActive;
     sheets = sheets.filter((s) => s.id !== id);
-    if (wasActive && sheets.length) sheets[0].isActive = true;
+    if (wasActive && sheets.length) {
+      sheets[0].isActive = true;
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: sheets[0].lastSyncAt || EPOCH });
+    } else if (wasActive && !sheets.length) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: EPOCH });
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
   }
   async switchProfile(id) {
     const sheets = await this.getProfiles();
-    for (const s of sheets) s.isActive = s.id === id;
+    let activeProfile = null;
+    for (const s of sheets) {
+      s.isActive = s.id === id;
+      if (s.isActive) activeProfile = s;
+    }
     await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+    if (activeProfile) {
+      await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: activeProfile.lastSyncAt || EPOCH });
+    }
   }
   // ---- Remote calls ----
   async _call(action, body) {
@@ -4530,7 +4552,9 @@ var SyncEngine = class {
    * @returns {Promise<{ pushed:number, pulled:number, conflicts:number }>}
    */
   async sync(vault2) {
-    const { [STORAGE_KEYS.LAST_SYNC_AT]: lastSyncAt = EPOCH } = await this.storage.get(STORAGE_KEYS.LAST_SYNC_AT);
+    const profile = await this.getActiveProfile();
+    const { [STORAGE_KEYS.LAST_SYNC_AT]: globalLastSyncAt = EPOCH } = await this.storage.get(STORAGE_KEYS.LAST_SYNC_AT);
+    const lastSyncAt = profile ? profile.lastSyncAt || EPOCH : globalLastSyncAt;
     const records = await vault2.exportRecords();
     const modified = records.filter((r) => (r.updatedAt || EPOCH) > lastSyncAt);
     let result;
@@ -4542,7 +4566,17 @@ var SyncEngine = class {
     }
     const pulled = result.updatedEntries || [];
     const { applied } = await vault2.mergeRemoteRecords(pulled);
-    await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: result.serverTimestamp || nowIso() });
+    const nextSyncAt = result.serverTimestamp || nowIso();
+    if (profile) {
+      profile.lastSyncAt = nextSyncAt;
+      const sheets = await this.getProfiles();
+      const idx = sheets.findIndex((s) => s.id === profile.id);
+      if (idx !== -1) {
+        sheets[idx] = profile;
+        await this.storage.set({ [STORAGE_KEYS.SHEETS_CONFIG]: sheets });
+      }
+    }
+    await this.storage.set({ [STORAGE_KEYS.LAST_SYNC_AT]: nextSyncAt });
     return { pushed: modified.length, pulled: applied, conflicts: (result.conflicts || []).length };
   }
   // ---- Offline queue ----
@@ -4993,6 +5027,8 @@ var settings = { ...DEFAULT_SETTINGS };
 var view = { name: "loading", tab: "all", id: null };
 var totpTimer = null;
 var idleTimer = null;
+var selectMode = false;
+var selected = /* @__PURE__ */ new Set();
 function h(tag2, props = {}, ...kids) {
   const e = document.createElement(tag2);
   for (const [k, v] of Object.entries(props)) {
@@ -5109,6 +5145,7 @@ async function boot() {
       await vault.unlockWithDek(dek);
       dek.fill(0);
       resetIdle();
+      showFloatingLock();
       return renderMain();
     } catch {
     }
@@ -5126,6 +5163,7 @@ async function saveSettings(patch) {
   });
 }
 function renderSetup() {
+  hideFloatingLock();
   clear(app);
   const pw = h("input", { class: "vs-input", type: "password", placeholder: "Create master password" });
   const pw2 = h("input", { class: "vs-input", type: "password", placeholder: "Confirm master password" });
@@ -5140,6 +5178,7 @@ function renderSetup() {
     try {
       const { recoveryMnemonic } = await vault.setup(pw.value);
       cacheDek(vault.exportDek(), settings.autoLockTimeout);
+      showFloatingLock();
       renderRecoveryReveal(recoveryMnemonic, () => {
         resetIdle();
         renderMain();
@@ -5184,6 +5223,7 @@ function renderRecoveryReveal(mnemonic, done) {
   ));
 }
 function renderLocked() {
+  hideFloatingLock();
   clear(app);
   const pw = h("input", { class: "vs-input", type: "password", placeholder: "Master password" });
   const btn = h("button", { class: "vs-btn vs-btn-primary vs-btn-block", text: "Unlock" });
@@ -5194,6 +5234,7 @@ function renderLocked() {
       await vault.unlock(pw.value);
       cacheDek(vault.exportDek(), settings.autoLockTimeout);
       resetIdle();
+      showFloatingLock();
       renderMain();
       if (settings.autoSyncEnabled && await sync.getActiveProfile()) sync.sync(vault).catch(() => {
       });
@@ -5214,8 +5255,19 @@ function renderLocked() {
     "OKey",
     h("div", { class: "vs-field" }, pw),
     btn,
-    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:10px", text: "Forgot password? Recover", onclick: renderRecover })
+    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:10px", text: "Forgot password? Recover", onclick: renderRecover }),
+    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:8px;color:var(--vs-danger)", text: "Reset vault & start fresh", onclick: handleStartFresh })
   ));
+}
+async function handleStartFresh() {
+  if (confirm("Warning: This will permanently delete all saved passwords and configuration on this device. (This does not delete your Google Sheets data, and you can reconnect later.) Are you sure you want to start fresh?")) {
+    vault.lock();
+    clearSession();
+    const keys = [...Object.values(STORAGE_KEYS), ...Object.keys(LEGACY_STORAGE_KEYS)];
+    await store.remove(keys);
+    toast("Vault reset successfully", "success");
+    renderSetup();
+  }
 }
 function renderRecover() {
   clear(app);
@@ -5279,9 +5331,90 @@ function renderMain() {
   search.addEventListener("input", () => list(body, search.value));
   list(body, "");
 }
+function selectToolbar(body, q) {
+  const toggle = h("button", {
+    class: "vs-btn vs-btn-ghost vs-btn-sm",
+    text: selectMode ? "Done" : "Select",
+    onclick: () => {
+      selectMode = !selectMode;
+      selected.clear();
+      list(body, q);
+    }
+  });
+  const row = h("div", { class: "vs-row", style: "padding:2px 4px;margin-bottom:8px" }, h("div", { class: "vs-spacer" }), toggle);
+  if (selectMode) {
+    const del = h("button", {
+      class: "vs-btn vs-btn-danger vs-btn-sm",
+      text: `Delete (${selected.size})`,
+      disabled: !selected.size,
+      onclick: async () => {
+        if (confirm(`Are you sure you want to delete ${selected.size} selected item${selected.size === 1 ? "" : "s"}? This cannot be undone.`)) {
+          await vault.deleteEntries([...selected]);
+          selectMode = false;
+          selected.clear();
+          toast("Deleted", "success");
+          list(body, q);
+          scheduleSync();
+        }
+      }
+    });
+    const exp = h("button", {
+      class: "vs-btn vs-btn-secondary vs-btn-sm",
+      text: `Export (${selected.size})`,
+      disabled: !selected.size,
+      onclick: () => {
+        const selectedEntries = [...selected].map((id) => vault.getEntry(id)).filter(Boolean);
+        download("okey-selected-export.csv", exportCsv(selectedEntries));
+        selectMode = false;
+        selected.clear();
+        toast("Exported CSV", "success");
+        list(body, q);
+      }
+    });
+    row.insertBefore(del, row.firstChild);
+    row.insertBefore(exp, del.nextSibling);
+  }
+  return row;
+}
+function startGlobalTotpTicker() {
+  clearInterval(totpTimer);
+  async function tick() {
+    const containers = document.querySelectorAll(".okey-row-totp-container");
+    if (!containers.length) {
+      clearInterval(totpTimer);
+      return;
+    }
+    for (const container of containers) {
+      const secret = container.dataset.secret;
+      const codeSpan = container.querySelector(".okey-row-totp-code");
+      const bar = container.querySelector(".okey-row-totp-progress-bar");
+      if (!secret || !codeSpan) continue;
+      try {
+        const { code, remaining, period } = await generateTOTP(secret);
+        codeSpan.textContent = code.replace(/(\d{3})(\d{3})/, "$1 $2");
+        if (bar) {
+          const pct = remaining / period * 100;
+          bar.style.transform = `scaleX(${pct / 100})`;
+          if (remaining < 6) {
+            bar.style.background = "var(--vs-danger)";
+            codeSpan.style.color = "var(--vs-danger)";
+          } else {
+            bar.style.background = "var(--vs-brand)";
+            codeSpan.style.color = "var(--vs-brand)";
+          }
+        }
+      } catch {
+        codeSpan.textContent = "ERROR";
+      }
+    }
+  }
+  tick();
+  totpTimer = setInterval(tick, 1e3);
+}
 function list(body, q) {
   clear(body);
   let entries = q ? vault.search(q) : vault.getEntries(view.tab === "favorites" ? { favoritesOnly: true } : view.tab === "all" ? {} : { type: view.tab });
+  body.append(selectToolbar(body, q));
   if (!entries.length) return body.append(h("div", { class: "okey-empty", text: q ? "No matches" : "No items yet. Tap + to add." }));
   entries.forEach((e) => {
     const actions = h("div", { class: "okey-entry-actions" });
@@ -5298,20 +5431,67 @@ function list(body, q) {
       const { code } = await generateTOTP(e.totpSecret);
       copyValue(code, "Code copied");
     }));
+    let totpEl = null;
+    if (e.totpSecret) {
+      const codeSpan = h("span", { class: "okey-row-totp-code vs-mono", text: "\u2022\u2022\u2022\u2022\u2022\u2022" });
+      const progressBar = h("div", { class: "okey-row-totp-progress-bar" });
+      const progressEl = h("div", { class: "okey-row-totp-progress" }, progressBar);
+      totpEl = h("div", { class: "okey-row-totp-container", attrs: { "data-secret": e.totpSecret }, onclick: (ev) => {
+        ev.stopPropagation();
+        copyValue(codeSpan.textContent.replace(/\s/g, ""), "Code copied");
+      } }, codeSpan, progressEl);
+    }
     const row = h(
       "div",
-      { class: "okey-entry", onclick: () => renderDetail(e.id) },
-      avatar(e),
+      { class: "okey-entry" },
+      selectMode ? h("input", {
+        type: "checkbox",
+        class: "okey-checkbox",
+        checked: selected.has(e.id),
+        onclick: (ev) => {
+          ev.stopPropagation();
+          selected.has(e.id) ? selected.delete(e.id) : selected.add(e.id);
+          list(body, q);
+        }
+      }) : avatar(e),
       h(
         "div",
         { class: "okey-entry-main" },
         h("div", { class: "okey-entry-title", text: e.nickname || e.siteName || getDisplayDomain(e.domain) || "Untitled" }),
-        h("div", { class: "okey-entry-sub", text: e.username || getDisplayDomain(e.domain) || (e.entryType === ENTRY_TYPES.TOTP ? "Authenticator" : "") })
+        h("div", { class: "okey-entry-sub", text: e.username || getDisplayDomain(e.domain) || (e.entryType === ENTRY_TYPES.TOTP ? "Authenticator" : "") }),
+        totpEl
       ),
       actions
     );
+    let pressTimer;
+    const startPress = () => {
+      pressTimer = setTimeout(() => {
+        if (!selectMode) {
+          selectMode = true;
+          selected.clear();
+          selected.add(e.id);
+          list(body, q);
+        }
+      }, 600);
+    };
+    const cancelPress = () => clearTimeout(pressTimer);
+    row.addEventListener("touchstart", startPress, { passive: true });
+    row.addEventListener("touchend", cancelPress, { passive: true });
+    row.addEventListener("touchcancel", cancelPress, { passive: true });
+    row.addEventListener("mousedown", startPress);
+    row.addEventListener("mouseup", cancelPress);
+    row.addEventListener("mouseleave", cancelPress);
+    row.addEventListener("click", () => {
+      if (selectMode) {
+        selected.has(e.id) ? selected.delete(e.id) : selected.add(e.id);
+        list(body, q);
+      } else {
+        renderDetail(e.id);
+      }
+    });
     body.append(row);
   });
+  startGlobalTotpTicker();
 }
 function renderDetail(id) {
   const e = vault.getEntry(id);
@@ -5553,6 +5733,50 @@ function renderGenerator() {
   ));
   regen();
 }
+function renderChangeMasterPassword() {
+  clear(app);
+  view.name = "change-password";
+  const currentPw = h("input", { class: "vs-input", type: "password", placeholder: "Current master password" });
+  const newPw = h("input", { class: "vs-input", type: "password", placeholder: "New master password" });
+  const confirmNewPw = h("input", { class: "vs-input", type: "password", placeholder: "Confirm new master password" });
+  const meter = strengthMeter();
+  newPw.addEventListener("input", () => meter.update(newPw.value));
+  const submitBtn = h("button", { class: "vs-btn vs-btn-primary vs-btn-block", text: "Change Password" });
+  submitBtn.addEventListener("click", async () => {
+    if (newPw.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
+      return toast(`New password must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} characters`, "error");
+    }
+    if (newPw.value !== confirmNewPw.value) {
+      return toast("New passwords do not match", "error");
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Updating\u2026";
+    try {
+      const probe = new Vault(store);
+      await probe.unlock(currentPw.value);
+      probe.lock();
+      await vault.changeMasterPassword(newPw.value);
+      cacheDek(vault.exportDek(), settings.autoLockTimeout);
+      toast("Master password changed successfully", "success");
+      renderSettings();
+      await doSync();
+    } catch (e) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Change Password";
+      toast(e.code === "DECRYPTION_FAILED" ? "Incorrect current master password" : e.message, "error");
+    }
+  });
+  app.append(h(
+    "div",
+    { class: "okey-view" },
+    appbar("Change Password", renderSettings),
+    h("div", { class: "vs-field" }, h("label", { class: "vs-label", text: "Current Password" }), currentPw),
+    h("div", { class: "vs-field" }, h("label", { class: "vs-label", text: "New Password" }), newPw, meter.el),
+    h("div", { class: "vs-field" }, h("label", { class: "vs-label", text: "Confirm New Password" }), confirmNewPw),
+    submitBtn
+  ));
+  requestAnimationFrame(() => currentPw.focus());
+}
 async function renderSettings() {
   clear(app);
   const themeSel = h("select", { class: "vs-select" }, ...["system", "dark", "light"].map((t) => h("option", { value: t, selected: settings.theme === t }, t)));
@@ -5570,6 +5794,7 @@ async function renderSettings() {
       "Security",
       numberSetting("Auto-lock (seconds)", settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => saveSettings({ autoLockTimeout: v })),
       numberSetting("Clipboard clear (seconds)", settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => saveSettings({ clipboardClearTimeout: v })),
+      h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Change master password" }), h("button", { class: "vs-btn vs-btn-secondary vs-btn-sm", text: "Change", onclick: renderChangeMasterPassword })),
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Theme" }), themeSel)
     ),
     group(
@@ -5649,7 +5874,7 @@ async function doSync() {
     await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {
     });
-    toast(`Synced \xB7 \u2191${r.pushed} \u2193${r.pulled}`, "success");
+    toast(`Synced \xB7 \u2191${r.pushed} \u2193${r.pulled} (${vault.getEntries().length})`, "success");
   } catch (e) {
     toast(`Sync failed: ${e.message}`, "error");
   }
@@ -5699,6 +5924,25 @@ function download(name, text) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1e3);
+}
+function showFloatingLock() {
+  if (document.getElementById("okey-lock-fab")) return;
+  const lockBtn = h("button", {
+    id: "okey-lock-fab",
+    class: "okey-lock-fab",
+    title: "Lock now",
+    text: "\u{1F512}",
+    onclick: () => {
+      vault.lock();
+      clearSession();
+      renderLocked();
+      toast("Vault locked", "info");
+    }
+  });
+  document.body.append(lockBtn);
+}
+function hideFloatingLock() {
+  document.getElementById("okey-lock-fab")?.remove();
 }
 boot();
 //# sourceMappingURL=app.js.map

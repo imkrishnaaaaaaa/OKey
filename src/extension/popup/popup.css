@@ -546,3 +546,40 @@ body {
 .okey-entry:hover .okey-row-totp-container {
   display: none;
 }
+
+/* Floating Lock button */
+.okey-lock-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 50px;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--vs-radius-pill);
+  background: var(--vs-bg-elev-3);
+  border: 1px solid var(--vs-border);
+  color: var(--vs-text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--vs-shadow-lg);
+  cursor: pointer;
+  z-index: 99;
+  transition: transform var(--vs-dur) var(--vs-ease), background var(--vs-dur), color var(--vs-dur);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.okey-lock-fab:hover {
+  background: var(--vs-bg-elev-4);
+  color: var(--vs-danger);
+  transform: scale(1.08);
+}
+
+.okey-lock-fab:active {
+  transform: scale(0.95);
+}
+
+.okey-lock-fab svg {
+  width: 18px;
+  height: 18px;
+}

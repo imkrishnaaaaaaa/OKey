@@ -8,6 +8,8 @@
 export const APP = Object.freeze({
   NAME: 'OKey',
   VERSION: '1.0.0',
+  APPSCRIPT_VERSION: '1.0.0',
+  SCHEMA_VERSION: '1.0.0',
   /** Bumped when the at-rest vault container format changes. */
   VAULT_FORMAT_VERSION: 2,
   /** Bumped when an individual entry's schema changes. */

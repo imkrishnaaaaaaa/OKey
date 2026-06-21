@@ -72,6 +72,7 @@ const ICONS = {
   back: '<svg viewBox="0 0 24 24" fill="none"><path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.3-2.6h-4l-.3 2.6a7 7 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z" stroke="currentColor" stroke-width="1.5"/></svg>',
+  dots: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8" stroke="currentColor" stroke-width="2"/></svg>',
   user: '<svg viewBox="0 0 24 24" fill="none"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="7" r="4" stroke="currentColor" stroke-width="2"/></svg>',
   key: '<svg viewBox="0 0 24 24" fill="none"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3M15.5 7.5L14 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -212,6 +213,13 @@ async function boot() {
       const saved = await getViewState();
       if (saved?.tab) view.tab = saved.tab;
       showFloatingLock();
+
+      sync.checkVersion().then((v) => {
+        if (v && v.mismatch) {
+          toast('Warning: Backend version mismatch. Please update Apps Script code.', 'warning');
+        }
+      }).catch(() => {});
+
       return restoreSavedView(saved); // feedback #1, #15 (no "unlocked" toast), #25
     } catch { /* fall through to locked */ }
   }
@@ -465,7 +473,7 @@ function renderMain() {
     h('div', { class: 'okey-logo' }, h('span', { class: 'okey-logo-mark', html: ICONS.logo }), 'OKey'),
     h('div', { class: 'okey-search' }, h('span', { html: ICONS.search }), search),
     iconBtn(ICONS.plus, 'Add', () => renderEdit(null)),
-    iconBtn(ICONS.gear, 'Settings', renderSettings),
+    iconBtn(ICONS.dots, 'Menu', renderMainMenu),
   );
 
   const tabs = h('div', { class: 'okey-tabs' },
@@ -994,9 +1002,11 @@ function addSheetModal(done) {
     h('div', { class: 'vs-field' }, url),
     h('p', { class: 'vs-faint', text: 'Deploy the OKey Apps Script as a Web App and paste its /exec URL. See SETUP.md.' }),
     h('div', { class: 'vs-row' },
-      h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Setup new sheet', onclick: async () => {
+      h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Setup new sheet', onclick: async (ev) => {
+        const b = ev.currentTarget;
+        b.disabled = true; b.textContent = 'Setting up...';
         try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); await sync.setupSheet(); toast('Sheet structure created', 'success'); closeModal(); done(); }
-        catch (e) { toast(e.message, 'error'); }
+        catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Setup new sheet'; }
       } }),
       h('button', { class: 'vs-btn vs-btn-primary vs-spacer', text: 'Save', onclick: async () => {
         try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); toast('Vault added', 'success'); closeModal(); done(); }
@@ -1174,6 +1184,93 @@ function showFloatingLock() {
 
 function hideFloatingLock() {
   document.getElementById('okey-lock-fab')?.remove();
+}
+
+// ============================ POPUP MENU ============================
+function renderMainMenu(ev) {
+  closeModal(); // Remove any existing modal/popover
+  const menu = h('div', { class: 'okey-menu-popover vs-glass' },
+    h('button', { class: 'okey-menu-item', text: 'Dashboard', onclick: () => { closeModal(); renderDashboard(); } }),
+    h('button', { class: 'okey-menu-item', text: 'Analytics', onclick: () => { closeModal(); renderAnalytics(); } }),
+    h('button', { class: 'okey-menu-item', text: 'Settings', onclick: () => { closeModal(); renderSettings(); } })
+  );
+  
+  const rect = ev.currentTarget.getBoundingClientRect();
+  menu.style.position = 'absolute';
+  menu.style.top = `${rect.bottom + 8}px`;
+  menu.style.right = `${document.body.clientWidth - rect.right}px`;
+  menu.style.zIndex = '1000';
+
+  const ov = h('div', { class: 'vs-overlay', style: 'background:transparent', id: 'okey-modal', onclick: (e) => { if (e.target === ov) closeModal(); } }, menu);
+  document.body.append(ov);
+}
+
+// ============================ DASHBOARD & ANALYTICS ============================
+async function renderDashboard() {
+  view.name = 'dashboard';
+  view.entryId = null;
+  rememberView();
+  clear(app);
+  
+  const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading dashboard...' });
+  app.append(h('div', { class: 'okey-view' },
+    viewHeader('Dashboard', renderMain),
+    content
+  ));
+
+  try {
+    const data = await sync.fetchDashboard();
+    clear(content);
+    content.append(
+      h('div', { class: 'okey-stat-grid' },
+        statBox('Total Items', data.totalEntries || 0),
+        statBox('Active Items', data.activeEntries || 0),
+        statBox('Folders', data.folders || 0),
+        statBox('Deleted', data.deletedEntries || 0)
+      ),
+      h('div', { class: 'vs-faint', style: 'margin-top:16px; text-align:center', text: `Last Backend Sync: ${data.lastSync ? formatTimeAgo(data.lastSync) : 'Never'}` })
+    );
+  } catch (e) {
+    clear(content);
+    content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch dashboard: ' + e.message }));
+  }
+}
+
+async function renderAnalytics() {
+  view.name = 'analytics';
+  view.entryId = null;
+  rememberView();
+  clear(app);
+  
+  const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading analytics...' });
+  app.append(h('div', { class: 'okey-view' },
+    viewHeader('Analytics', renderMain),
+    content
+  ));
+
+  try {
+    const data = await sync.fetchAnalytics();
+    clear(content);
+    const types = data.entryTypes || {};
+    const folders = data.folders || {};
+    
+    content.append(
+      h('div', { class: 'okey-section-title', text: 'By Type' }),
+      ...Object.entries(types).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v }))),
+      h('div', { class: 'okey-section-title', style: 'margin-top:16px', text: 'By Folder' }),
+      ...Object.entries(folders).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v })))
+    );
+  } catch (e) {
+    clear(content);
+    content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch analytics: ' + e.message }));
+  }
+}
+
+function statBox(lbl, val) {
+  return h('div', { class: 'okey-stat-box vs-glass' },
+    h('div', { class: 'okey-stat-val', text: val }),
+    h('div', { class: 'okey-stat-lbl', text: lbl })
+  );
 }
 
 boot();

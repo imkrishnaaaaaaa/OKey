@@ -228,8 +228,35 @@ export class SyncEngine {
 
   /** Pull user settings from the Sheet. */
   async pullSettings() {
-    const r = await this._call('getSettings', {});
+    const r = await this._call('settings', {});
     return r.settings || {};
+  }
+
+  /** Check version compatibility. */
+  async checkVersion() {
+    try {
+      const r = await this._call('version', {});
+      return { 
+        backendVersion: r.version, 
+        backendSchema: r.schemaVersion,
+        localVersion: APP.APPSCRIPT_VERSION,
+        localSchema: APP.SCHEMA_VERSION,
+        mismatch: r.version !== APP.APPSCRIPT_VERSION || r.schemaVersion !== APP.SCHEMA_VERSION
+      };
+    } catch (e) {
+      if (e.code === 'NO_PROFILE') return { mismatch: false }; // no backend yet
+      throw e;
+    }
+  }
+
+  /** Fetch Vault Dashboard Stats. */
+  async fetchDashboard() {
+    return this._call('dashboard', {});
+  }
+
+  /** Fetch Vault Analytics Stats. */
+  async fetchAnalytics() {
+    return this._call('analytics', {});
   }
 
   /**

@@ -45,7 +45,7 @@ function h(tag, props = {}, ...kids) {
 const clear = (n) => n.replaceChildren();
 
 const I = {
-  copy: '⧉', eye: '👁', edit: '✎', trash: '🗑', back: '‹', plus: '+', gear: '⚙', refresh: '↻', star: '★', sync: '⟳', clock: '⏱', user: '👤', key: '🔑',
+  copy: '⧉', eye: '👁', edit: '✎', trash: '🗑', back: '‹', plus: '+', gear: '⚙', refresh: '↻', star: '★', sync: '⟳', clock: '⏱', user: '👤', key: '🔑', dots: '⋮',
 };
 
 function toast(msg, type = 'info') {
@@ -111,7 +111,15 @@ async function boot() {
   if (!state.isSetup) return renderSetup();
   const dek = await getCachedDek(settings.autoLockTimeout);
   if (dek) {
-    try { await vault.unlockWithDek(dek); dek.fill(0); resetIdle(); showFloatingLock(); return renderMain(); } catch {}
+    try { 
+      await vault.unlockWithDek(dek); dek.fill(0); resetIdle(); showFloatingLock(); 
+      sync.checkVersion().then((v) => {
+        if (v && v.mismatch) {
+          toast('Warning: Backend version mismatch. Please update Apps Script code.', 'warning');
+        }
+      }).catch(() => {});
+      return renderMain(); 
+    } catch {}
   }
   renderLocked();
 }
@@ -236,7 +244,7 @@ function renderMain() {
     h('div', { class: 'okey-logo' }, '🔑 OKey'),
     h('div', { style: 'display:flex;gap:8px;align-items:center' },
       syncBtn,
-      iconBtn(I.gear, 'Settings', renderSettings)));
+      iconBtn(I.dots, 'Menu', renderMainMenu)));
   const tabs = h('div', { class: 'okey-tabs' },
     ...['all', 'password', 'totp', 'favorites'].map((t) => h('button', { class: 'okey-tab', 'aria-selected': String(view.tab === t), text: { all: 'All', password: 'Logins', totp: 'Auth', favorites: '★' }[t], onclick: () => { view.tab = t; renderMain(); } })));
   const body = h('main', { class: 'okey-body' });
@@ -675,6 +683,90 @@ function showFloatingLock() {
 
 function hideFloatingLock() {
   document.getElementById('okey-lock-fab')?.remove();
+}
+
+// ============================ POPUP MENU ============================
+function renderMainMenu(ev) {
+  const existing = document.getElementById('okey-modal');
+  if (existing) existing.remove();
+  const menu = h('div', { class: 'okey-menu-popover vs-glass' },
+    h('button', { class: 'okey-menu-item', text: 'Dashboard', onclick: () => { document.getElementById('okey-modal')?.remove(); renderDashboard(); } }),
+    h('button', { class: 'okey-menu-item', text: 'Analytics', onclick: () => { document.getElementById('okey-modal')?.remove(); renderAnalytics(); } }),
+    h('button', { class: 'okey-menu-item', text: 'Settings', onclick: () => { document.getElementById('okey-modal')?.remove(); renderSettings(); } })
+  );
+  
+  const rect = ev.currentTarget.getBoundingClientRect();
+  menu.style.position = 'absolute';
+  menu.style.top = `${rect.bottom + 8}px`;
+  menu.style.right = `${document.body.clientWidth - rect.right}px`;
+  menu.style.zIndex = '1000';
+
+  const ov = h('div', { class: 'vs-overlay', style: 'background:transparent', id: 'okey-modal', onclick: (e) => { if (e.target === ov) ov.remove(); } }, menu);
+  document.body.append(ov);
+}
+
+// ============================ DASHBOARD & ANALYTICS ============================
+async function renderDashboard() {
+  view.name = 'dashboard';
+  clear(app);
+  
+  const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading dashboard...' });
+  app.append(h('div', { class: 'okey-view' },
+    appbar('Dashboard', renderMain),
+    content
+  ));
+
+  try {
+    const data = await sync.fetchDashboard();
+    clear(content);
+    content.append(
+      h('div', { class: 'okey-stat-grid' },
+        statBox('Total Items', data.totalEntries || 0),
+        statBox('Active Items', data.activeEntries || 0),
+        statBox('Folders', data.folders || 0),
+        statBox('Deleted', data.deletedEntries || 0)
+      ),
+      h('div', { class: 'vs-faint', style: 'margin-top:16px; text-align:center', text: `Last Backend Sync: ${data.lastSync ? formatTimeAgo(data.lastSync) : 'Never'}` })
+    );
+  } catch (e) {
+    clear(content);
+    content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch dashboard: ' + e.message }));
+  }
+}
+
+async function renderAnalytics() {
+  view.name = 'analytics';
+  clear(app);
+  
+  const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading analytics...' });
+  app.append(h('div', { class: 'okey-view' },
+    appbar('Analytics', renderMain),
+    content
+  ));
+
+  try {
+    const data = await sync.fetchAnalytics();
+    clear(content);
+    const types = data.entryTypes || {};
+    const folders = data.folders || {};
+    
+    content.append(
+      h('div', { class: 'okey-section-title', text: 'By Type' }),
+      ...Object.entries(types).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v }))),
+      h('div', { class: 'okey-section-title', style: 'margin-top:16px', text: 'By Folder' }),
+      ...Object.entries(folders).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v })))
+    );
+  } catch (e) {
+    clear(content);
+    content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch analytics: ' + e.message }));
+  }
+}
+
+function statBox(lbl, val) {
+  return h('div', { class: 'okey-stat-box vs-glass' },
+    h('div', { class: 'okey-stat-val', text: val }),
+    h('div', { class: 'okey-stat-lbl', text: lbl })
+  );
 }
 
 boot();

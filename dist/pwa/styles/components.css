@@ -268,7 +268,7 @@ body {
   position: absolute;
   inset: 0;
   background: var(--vs-bg-elev-3);
-  border-radius: var(--vs-radius-pill);
+  border-radius: 999px;
   transition: background var(--vs-dur);
   cursor: pointer;
 }
@@ -296,33 +296,40 @@ body {
 /* ---- Toasts ---- */
 .vs-toast-container {
   position: fixed;
-  bottom: 16px;
+  bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  z-index: 100000;
+  gap: 10px;
+  z-index: 2147483647;
   pointer-events: none;
   width: 90%;
+  max-width: 320px;
 }
 
 .vs-toast {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 8px;
-  padding: 6px 6px;
-  border-radius: var(--vs-radius-pill);
-  background: var(--vs-bg-elev-3);
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: var(--vs-radius-md);
+  background: rgba(23, 24, 27, 0.75);
   color: var(--vs-text);
-  box-shadow: var(--vs-shadow-lg);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
   font-size: var(--vs-fs-md);
-  font-weight: 600;
-  border: 1px solid var(--vs-border);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  font-weight: 500;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   animation: vs-toast-in var(--vs-dur) var(--vs-ease);
+}
+
+[data-theme='light'] .vs-toast {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(15, 18, 25, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(15, 18, 25, 0.12);
 }
 
 .vs-toast-icon {
@@ -332,41 +339,47 @@ body {
 }
 
 .vs-toast-success {
-  background: rgba(46, 204, 113, 0.14) !important;
-  border-color: rgba(46, 204, 113, 0.35) !important;
+  background: rgba(46, 204, 113, 0.12) !important;
+  border-color: rgba(46, 204, 113, 0.3) !important;
   color: #2ecc71 !important;
+  box-shadow: 0 8px 32px 0 rgba(46, 204, 113, 0.15) !important;
 }
 
 [data-theme='light'] .vs-toast-success {
-  background: rgba(46, 204, 113, 0.08) !important;
-  border-color: rgba(46, 204, 113, 0.4) !important;
-  color: #27ae60 !important;
+  background: rgba(46, 204, 113, 0.1) !important;
+  border-color: rgba(46, 204, 113, 0.3) !important;
+  color: #1e7e34 !important;
+  box-shadow: 0 8px 32px 0 rgba(46, 204, 113, 0.08) !important;
 }
 
 .vs-toast-error {
-  background: rgba(255, 92, 108, 0.14) !important;
-  border-color: rgba(255, 92, 108, 0.35) !important;
+  background: rgba(255, 92, 108, 0.12) !important;
+  border-color: rgba(255, 92, 108, 0.3) !important;
   color: #ff5c6c !important;
+  box-shadow: 0 8px 32px 0 rgba(255, 92, 108, 0.15) !important;
 }
 
 [data-theme='light'] .vs-toast-error {
-  background: rgba(255, 92, 108, 0.08) !important;
-  border-color: rgba(255, 92, 108, 0.4) !important;
-  color: #c0392b !important;
+  background: rgba(255, 92, 108, 0.1) !important;
+  border-color: rgba(255, 92, 108, 0.3) !important;
+  color: #bd2130 !important;
+  box-shadow: 0 8px 32px 0 rgba(255, 92, 108, 0.08) !important;
 }
 
 .vs-toast-warning,
 .vs-toast-info {
-  background: rgba(109, 94, 252, 0.14) !important;
-  border-color: rgba(109, 94, 252, 0.35) !important;
-  color: #8c7ffc !important;
+  background: rgba(109, 94, 252, 0.12) !important;
+  border-color: rgba(109, 94, 252, 0.3) !important;
+  color: #a89eff !important;
+  box-shadow: 0 8px 32px 0 rgba(109, 94, 252, 0.15) !important;
 }
 
 [data-theme='light'] .vs-toast-warning,
 [data-theme='light'] .vs-toast-info {
-  background: rgba(109, 94, 252, 0.08) !important;
+  background: rgba(109, 94, 252, 0.1) !important;
   border-color: rgba(109, 94, 252, 0.3) !important;
-  color: #5b4be8 !important;
+  color: #4c3cd3 !important;
+  box-shadow: 0 8px 32px 0 rgba(109, 94, 252, 0.08) !important;
 }
 
 .vs-toast-exit {
@@ -445,20 +458,20 @@ body {
   transition: background var(--vs-dur);
 }
 
-.vs-strength[data-level='1'] .vs-strength-bar:nth-child(-n+1),
-.vs-strength[data-level='2'] .vs-strength-bar:nth-child(-n+2),
-.vs-strength[data-level='3'] .vs-strength-bar:nth-child(-n+3),
-.vs-strength[data-level='4'] .vs-strength-bar:nth-child(-n+4),
-.vs-strength[data-level='5'] .vs-strength-bar:nth-child(-n+5) {
-  background: var(--vs-brand);
-}
-
 .vs-strength[data-level='1'] .vs-strength-bar:nth-child(1) {
   background: var(--vs-danger);
 }
 
 .vs-strength[data-level='2'] .vs-strength-bar:nth-child(-n+2) {
   background: var(--vs-warning);
+}
+
+.vs-strength[data-level='3'] .vs-strength-bar:nth-child(-n+3) {
+  background: var(--vs-success);
+}
+
+.vs-strength[data-level='4'] .vs-strength-bar:nth-child(-n+4) {
+  background: var(--vs-brand);
 }
 
 /* ---- Utility ---- */

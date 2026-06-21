@@ -249,6 +249,44 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Fetch vault metadata (salt, kdfParams, wrappedMaster) from a sheet without needing an active profile.
+   * Useful for "Restore from Sheet" flow and validating before blind sync.
+   * @param {string} [explicitUrl] Optional URL. If omitted, uses the active profile.
+   */
+  async fetchMetadata(explicitUrl) {
+    let url = explicitUrl;
+    if (!url) {
+      const profile = await this.getActiveProfile();
+      if (!profile?.appsScriptUrl) throw new SyncError('No vault sheet configured', 'NO_PROFILE');
+      url = profile.appsScriptUrl;
+    }
+    const trimmedUrl = url.trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+      throw new SyncError('Apps Script URL must start with https://script.google.com/', 'BAD_URL');
+    }
+    
+    const token = await this.network.getAuthToken();
+    const endpoint = `${trimmedUrl}?action=metadata`;
+    let res;
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      res = await this.network.fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({}),
+      });
+    } catch (e) {
+      throw new SyncError(`Network error: ${e.message}`, 'NETWORK');
+    }
+    
+    if (!res.ok) throw new SyncError(`Server returned HTTP ${res.status}`, 'HTTP');
+    const json = await res.json();
+    if (json.status !== 'ok') throw new SyncError(json.message || 'Failed to fetch metadata', json.code || 'REMOTE');
+    return json.metadata || {};
+  }
+
   /** Fetch Vault Dashboard Stats. */
   async fetchDashboard() {
     return this._call('dashboard', {});

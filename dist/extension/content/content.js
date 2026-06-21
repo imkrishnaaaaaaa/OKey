@@ -3,6 +3,8 @@
   var APP = Object.freeze({
     NAME: "OKey",
     VERSION: "1.0.0",
+    APPSCRIPT_VERSION: "1.0.0",
+    SCHEMA_VERSION: "1.0.0",
     /** Bumped when the at-rest vault container format changes. */
     VAULT_FORMAT_VERSION: 2,
     /** Bumped when an individual entry's schema changes. */
@@ -43,7 +45,10 @@
     MIN_CLIPBOARD_CLEAR_SECONDS: 10,
     MAX_CLIPBOARD_CLEAR_SECONDS: 120,
     IDLE_DETECTION_INTERVAL: 15,
-    MIN_MASTER_PASSWORD_LENGTH: 10
+    MIN_MASTER_PASSWORD_LENGTH: 4,
+    // 4-digit PIN
+    MAX_FAILED_UNLOCKS: 30,
+    WARN_FAILED_UNLOCKS: 25
   });
   var SYNC = Object.freeze({
     DEFAULT_INTERVAL_MINUTES: 1440,
@@ -124,7 +129,13 @@
     BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
     SCHEMA_MIGRATED: "okey_schema_migrated",
     CACHED_FOLDERS: "okey_cached_folders",
-    FOLDERS_CACHE_TIME: "okey_folders_cache_time"
+    FOLDERS_CACHE_TIME: "okey_folders_cache_time",
+    FAILED_UNLOCK_ATTEMPTS: "okey_failed_unlocks",
+    BACKEND_VERSION_MISMATCH: "okey_backend_version_mismatch",
+    BACKEND_CAPABILITIES: "okey_backend_capabilities",
+    BACKEND_DASHBOARD: "okey_backend_dashboard",
+    BACKEND_ANALYTICS: "okey_backend_analytics",
+    ANALYTICS_CACHE_TIME: "okey_analytics_cache_time"
   });
   var LEGACY_STORAGE_KEYS = Object.freeze({
     vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,

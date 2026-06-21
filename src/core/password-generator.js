@@ -144,12 +144,11 @@ export function passphraseEntropyBits(wordCount, listSize = wordlist.length) {
  */
 export function strengthFromEntropy(bits) {
   let level;
-  if (bits < 28) level = 1;
-  else if (bits < 36) level = 2;
-  else if (bits < 60) level = 3;
-  else if (bits < 80) level = 4;
-  else level = 5;
-  return { level, label: ['', 'Very weak', 'Weak', 'Fair', 'Strong', 'Very strong'][level] };
+  if (bits < 36) level = 1;
+  else if (bits < 60) level = 2;
+  else if (bits < 80) level = 3;
+  else level = 4;
+  return { level, label: ['', 'Weak', 'Fair', 'Strong', 'Very strong'][level] };
 }
 
 /** Analyze an arbitrary password string. */

@@ -21,7 +21,7 @@
  *   Only `domain` is cleartext metadata (searchable, per product decision).
  */
 
-import { APP, STORAGE_KEYS, ENTRY_TYPES } from './constants.js';
+import { APP, STORAGE_KEYS, LEGACY_STORAGE_KEYS, ENTRY_TYPES, SECURITY } from './constants.js';
 import {
   generateDek, importAesKey, encryptJson, decryptJson, wrapKeyMaterial, unwrapKeyMaterial,
   generateSalt, secureWipe,
@@ -108,6 +108,50 @@ export class Vault {
   }
 
   /**
+   * Initialize local storage from a remote sheet's key material and test decryption.
+   * @param {string} masterPassword 
+   * @param {Object} metadata The salt, wrappedMaster, and kdfParams from the sheet
+   * @param {Array} entries The encrypted entries from the sheet
+   */
+  async restoreFromRemote(masterPassword, metadata, entries) {
+    if (!metadata || !metadata.salt || !metadata.wrappedMaster) {
+      throw new ValidationError('Remote vault does not contain valid key material');
+    }
+    
+    const salt = base64ToBytes(metadata.salt);
+    const kdfParams = metadata.kdfParams;
+    const { kek } = await deriveKek(masterPassword, salt, kdfParams);
+    
+    let dek;
+    try {
+      dek = await unwrapKeyMaterial(metadata.wrappedMaster, kek);
+    } catch (e) {
+      secureWipe(kek);
+      throw new DecryptionError('Incorrect master password for the remote vault');
+    }
+    secureWipe(kek);
+    
+    this._dek = dek;
+    this._dekKey = await importAesKey(dek, false);
+    this._salt = salt;
+    this._kdfParams = kdfParams;
+    this._unlocked = true;
+    this._payloadCache.clear();
+    
+    this._entries = await this._decryptRecords(entries || []);
+    
+    await this.storage.set({
+      [STORAGE_KEYS.VAULT_SALT]: metadata.salt,
+      [STORAGE_KEYS.KDF_PARAMS]: kdfParams,
+      [STORAGE_KEYS.WRAPPED_BY_MASTER]: metadata.wrappedMaster,
+      [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: metadata.wrappedRecovery || '',
+      [STORAGE_KEYS.VAULT_DATA]: entries || [],
+      [STORAGE_KEYS.VAULT_METADATA]: { formatVersion: metadata.formatVersion || APP.VAULT_FORMAT_VERSION, createdAt: nowIso() },
+      [STORAGE_KEYS.SETUP_COMPLETE]: true,
+    });
+  }
+
+  /**
    * Unlock with the master password.
    * @param {string} masterPassword
    * @returns {Promise<void>}
@@ -116,15 +160,36 @@ export class Vault {
   async unlock(masterPassword) {
     const c = await this._loadContainer();
     if (!c.salt || !c.wrappedMaster) throw new ValidationError('Vault is not initialized');
+
+    const fails = (await this.storage.get(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS)) || 0;
+    if (fails >= SECURITY.MAX_FAILED_UNLOCKS) {
+      throw new Error(`Too many incorrect attempts. Vault has been reset for your security.`);
+    }
+
     const { kek } = await deriveKek(masterPassword, c.salt, c.kdfParams);
     let dek;
     try {
       dek = await unwrapKeyMaterial(c.wrappedMaster, kek);
     } catch (e) {
       secureWipe(kek);
-      throw new DecryptionError('Incorrect master password');
+      const newFails = fails + 1;
+      await this.storage.set({ [STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS]: newFails });
+      
+      if (newFails >= SECURITY.MAX_FAILED_UNLOCKS) {
+        const keys = [...Object.values(STORAGE_KEYS), ...Object.keys(LEGACY_STORAGE_KEYS)];
+        await this.storage.remove(keys);
+        throw new DecryptionError(`Too many incorrect attempts. Vault has been completely wiped for security.`);
+      } else if (newFails >= SECURITY.WARN_FAILED_UNLOCKS) {
+        throw new DecryptionError(`Incorrect master PIN. WARNING: ${SECURITY.MAX_FAILED_UNLOCKS - newFails} attempts remaining before vault is wiped!`);
+      }
+      throw new DecryptionError('Incorrect master PIN');
     }
     secureWipe(kek);
+    
+    if (fails > 0) {
+      await this.storage.remove(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS);
+    }
+    
     await this._activateWithDek(dek, c);
   }
 
@@ -564,8 +629,8 @@ function payloadFields(entry) {
 }
 
 function assertStrongPassword(pw) {
-  if (typeof pw !== 'string' || pw.length < 10) {
-    throw new ValidationError('Master password must be at least 10 characters');
+  if (typeof pw !== 'string' || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
+    throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
 }
 

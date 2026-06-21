@@ -4,7 +4,7 @@
     "description": "The name of the extension."
   },
   "appDescription": {
-    "message": "One Key to rule them all. A privacy-first, zero-knowledge password & 2FA manager backed by your own Google Sheet.",
+    "message": "A premium zero-knowledge password & 2FA manager backed by your own Google Sheet.",
     "description": "The extension store description."
   }
 }

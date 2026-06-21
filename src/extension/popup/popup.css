@@ -79,13 +79,20 @@ body {
 /* ---- Tabs ---- */
 .okey-tabs {
   display: flex;
-  gap: 4px;
+  gap: 8px;
   padding: 8px 16px;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+}
+
+.okey-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .okey-tab {
-  flex: 1;
-  padding: 7px 4px;
+  flex: 0 0 auto;
+  padding: 7px 14px;
   border: none;
   background: transparent;
   color: var(--vs-text-muted);
@@ -278,6 +285,8 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 0px 16px 16px;
+  display: flex;
+  flex-direction: column;
 }
 
 .okey-view::-webkit-scrollbar {
@@ -419,6 +428,10 @@ body {
   gap: 12px;
   padding: 12px 4px;
   border-bottom: 1px solid var(--vs-border);
+}
+
+.okey-setting:last-child {
+  border-bottom: none;
 }
 
 .okey-setting-main {

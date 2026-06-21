@@ -27,8 +27,88 @@ let settings = { ...DEFAULT_SETTINGS };
 let view = { name: 'loading', tab: 'all', id: null };
 let totpTimer = null;
 let idleTimer = null;
+let healthTimer = null;
 let selectMode = false;
 const selected = new Set();
+
+let backendVersionMismatch = false;
+let backendCapabilities = {};
+let dashboardData = null;
+
+async function loadStartupData() {
+  const profile = await sync.getActiveProfile();
+  if (!profile?.appsScriptUrl) return;
+  try {
+    const cached = await store.get([
+      STORAGE_KEYS.BACKEND_VERSION_MISMATCH,
+      STORAGE_KEYS.BACKEND_CAPABILITIES,
+      STORAGE_KEYS.BACKEND_DASHBOARD
+    ]);
+    backendVersionMismatch = cached[STORAGE_KEYS.BACKEND_VERSION_MISMATCH] || false;
+    backendCapabilities = cached[STORAGE_KEYS.BACKEND_CAPABILITIES] || {};
+    dashboardData = cached[STORAGE_KEYS.BACKEND_DASHBOARD] || null;
+    if (view.name === 'main') {
+      renderMain();
+    }
+
+    const [ver, cfg, dash] = await Promise.all([
+      sync.checkVersion().catch((err) => { console.error("Version check error:", err); return null; }),
+      sync._call('config').catch((err) => { console.error("Config check error:", err); return null; }),
+      sync.fetchDashboard().catch((err) => { console.error("Dashboard fetch error:", err); return null; })
+    ]);
+
+    if (ver) {
+      backendVersionMismatch = ver.mismatch;
+      await store.set({ [STORAGE_KEYS.BACKEND_VERSION_MISMATCH]: backendVersionMismatch });
+    }
+    if (cfg) {
+      backendCapabilities = cfg.features || {};
+      await store.set({ [STORAGE_KEYS.BACKEND_CAPABILITIES]: backendCapabilities });
+    }
+    if (dash) {
+      dashboardData = dash;
+      await store.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+    }
+
+    if (view.name === 'main') {
+      renderMain();
+    }
+  } catch (e) {
+    console.error("Startup sync error:", e);
+  }
+}
+
+async function refreshDashboardAfterSync() {
+  try {
+    const dash = await sync.fetchDashboard();
+    if (dash) {
+      dashboardData = dash;
+      await store.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+      if (view.name === 'main') {
+        renderMain();
+      }
+    }
+  } catch (e) {
+    console.error("Failed to refresh dashboard stats after sync:", e);
+  }
+}
+
+function renderHomeDashboard() {
+  if (!dashboardData) return null;
+  const lastSyncText = dashboardData.lastSync ? formatTimeAgo(dashboardData.lastSync) : 'Never';
+  return h('div', { class: 'okey-home-dashboard vs-glass', style: 'padding:12px; margin: 0 12px 12px 12px; border-radius:12px; font-size:12px; border:1px solid var(--vs-border);' },
+    h('div', { style: 'display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:center; font-weight:bold; margin-bottom: 8px;' },
+      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-brand);' }, dashboardData.activeEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Active')),
+      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-success);' }, dashboardData.pinnedEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Pinned')),
+      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-warning);' }, dashboardData.folders ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Folders')),
+      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-text-muted);' }, dashboardData.deletedEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Deleted'))
+    ),
+    h('div', { style: 'display:flex; justify-content:space-between; font-size:10px; border-top: 1px solid var(--vs-border); padding-top:6px;' },
+      h('span', { class: 'vs-faint' }, `Total Items: ${dashboardData.totalEntries ?? 0}`),
+      h('span', { class: 'vs-faint' }, `Synced: ${lastSyncText}`)
+    )
+  );
+}
 
 // ---------- DOM helper ----------
 function h(tag, props = {}, ...kids) {
@@ -46,6 +126,9 @@ const clear = (n) => n.replaceChildren();
 
 const I = {
   copy: '⧉', eye: '👁', edit: '✎', trash: '🗑', back: '‹', plus: '+', gear: '⚙', refresh: '↻', star: '★', sync: '⟳', clock: '⏱', user: '👤', key: '🔑', dots: '⋮',
+  export: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
+  import: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.89A.5.5 0 0 0 6.33 14h11.34a.5.5 0 0 0 .42-.56l-1.78-.89A2 2 0 0 1 15 10.76V7h-6v3.76zM15 3H9v4h6V3z"/></svg>',
 };
 
 function toast(msg, type = 'info') {
@@ -113,11 +196,7 @@ async function boot() {
   if (dek) {
     try { 
       await vault.unlockWithDek(dek); dek.fill(0); resetIdle(); showFloatingLock(); 
-      sync.checkVersion().then((v) => {
-        if (v && v.mismatch) {
-          toast('Warning: Backend version mismatch. Please update Apps Script code.', 'warning');
-        }
-      }).catch(() => {});
+      loadStartupData().catch((err) => console.error("loadStartupData error:", err));
       return renderMain(); 
     } catch {}
   }
@@ -137,14 +216,13 @@ async function saveSettings(patch) {
 function renderSetup() {
   hideFloatingLock();
   clear(app);
-  const pw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Create master password' });
-  const pw2 = h('input', { class: 'vs-input', type: 'password', placeholder: 'Confirm master password' });
-  const meter = strengthMeter();
-  pw.addEventListener('input', () => meter.update(pw.value));
+  const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Create 4-digit master PIN' });
+  const pw2 = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Confirm 4-digit master PIN' });
+  pw.addEventListener('input', () => { if (pw.value.length === 4) pw2.focus(); });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Create vault' });
   btn.addEventListener('click', async () => {
-    if (pw.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) return toast(`At least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} characters`, 'error');
-    if (pw.value !== pw2.value) return toast('Passwords do not match', 'error');
+    if (pw.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) return toast(`At least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits required`, 'error');
+    if (pw.value !== pw2.value) return toast('PINs do not match', 'error');
     btn.disabled = true; btn.textContent = 'Creating…';
     try {
       const { recoveryMnemonic } = await vault.setup(pw.value);
@@ -153,9 +231,56 @@ function renderSetup() {
       renderRecoveryReveal(recoveryMnemonic, () => { resetIdle(); renderMain(); });
     } catch (e) { btn.disabled = false; btn.textContent = 'Create vault'; toast(e.message, 'error'); }
   });
+  pw2.addEventListener('input', () => { if (pw2.value.length === 4 && pw.value === pw2.value) btn.click(); });
   app.append(screen('Welcome to OKey',
-    h('p', { class: 'vs-muted', text: 'Your master password encrypts everything on this device. It is never stored and cannot be recovered — keep it safe.' }),
-    h('div', { class: 'vs-field' }, pw, meter.el), h('div', { class: 'vs-field' }, pw2), btn));
+    h('p', { class: 'vs-muted', text: 'Your 4-digit Master PIN encrypts everything on this device. It is never stored and cannot be recovered. Keep it safe.' }),
+    h('div', { class: 'vs-field' }, pw), h('div', { class: 'vs-field' }, pw2), btn,
+    h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-top:16px', text: 'Restore from Google Sheet', onclick: renderRestoreFromSheet })
+  ));
+}
+
+function renderRestoreFromSheet() {
+  hideFloatingLock();
+  clear(app);
+  const url = h('input', { class: 'vs-input', type: 'text', placeholder: 'Apps Script URL' });
+  const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Master PIN' });
+  const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Connect & Restore' });
+  
+  pw.addEventListener('input', () => { if (pw.value.length === 4) btn.click(); });
+  btn.addEventListener('click', async () => {
+    if (!url.value || !pw.value) return toast('Fill all fields', 'error');
+    btn.disabled = true; btn.textContent = 'Connecting...';
+    try {
+      const trimmedUrl = url.value.trim();
+      const meta = await sync.fetchMetadata(trimmedUrl);
+      if (!meta || !meta.salt) throw new Error('No vault data found on this sheet.');
+      
+      const profile = await sync.addProfile({ label: 'Restored Vault', appsScriptUrl: trimmedUrl });
+      const remoteData = await sync.pullVault();
+      
+      await vault.restoreFromRemote(pw.value, remoteData.metadata, remoteData.entries);
+      cacheDek(vault.exportDek(), settings.autoLockTimeout);
+      showFloatingLock();
+      toast('Vault restored successfully', 'success');
+      resetIdle();
+      renderMain();
+    } catch (e) {
+      const profiles = await sync.getProfiles();
+      const p = profiles.find(x => x.appsScriptUrl === url.value.trim());
+      if (p) await sync.removeProfile(p.id);
+      
+      btn.disabled = false; btn.textContent = 'Connect & Restore';
+      toast(e.message, 'error');
+    }
+  });
+
+  app.append(screen('Restore from Sheet',
+    h('p', { class: 'vs-faint', style: 'margin-bottom:12px' }, 'Connect to an existing Google Sheet to sync your vault to this device.'),
+    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Apps Script URL'), url),
+    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Master PIN'), pw),
+    btn,
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px', text: 'Back', onclick: renderSetup })
+  ));
 }
 
 function renderRecoveryReveal(mnemonic, done) {
@@ -178,7 +303,7 @@ function renderRecoveryReveal(mnemonic, done) {
 function renderLocked() {
   hideFloatingLock();
   clear(app);
-  const pw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Master password' });
+  const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Master PIN', autofocus: true });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Unlock' });
   const go = async () => {
     btn.disabled = true; btn.textContent = 'Unlocking…';
@@ -188,9 +313,12 @@ function renderLocked() {
       resetIdle();
       showFloatingLock();
       renderMain();
-      if (settings.autoSyncEnabled && (await sync.getActiveProfile())) sync.sync(vault).catch(() => {});
+      loadStartupData().catch((err) => console.error("loadStartupData error:", err));
+      if (settings.autoSyncEnabled && (await sync.getActiveProfile())) {
+        sync.sync(vault).then(() => refreshDashboardAfterSync()).catch(() => {});
+      }
     }
-    catch (e) { btn.disabled = false; btn.textContent = 'Unlock'; toast(e.code === 'DECRYPTION_FAILED' ? 'Incorrect master password' : e.message, 'error'); }
+    catch (e) { btn.disabled = false; btn.textContent = 'Unlock'; toast(e.code === 'DECRYPTION_FAILED' ? e.message : 'Unlock failed', 'error'); }
   };
   pw.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -198,10 +326,11 @@ function renderLocked() {
       go();
     }
   });
+  pw.addEventListener('input', () => { if (pw.value.length === 4) go(); });
   btn.addEventListener('click', go);
   app.append(screen('OKey', h('div', { class: 'vs-field' }, pw), btn,
-    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot password? Recover', onclick: renderRecover }),
-    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px;color:var(--vs-danger)', text: 'Reset vault & start fresh', onclick: handleStartFresh })));
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot PIN? Recover', onclick: renderRecover }),
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:32px;color:var(--vs-danger);border:1px solid var(--vs-danger);opacity:0.8', text: 'Reset vault & start fresh', onclick: handleStartFresh })));
 }
 
 async function handleStartFresh() {
@@ -218,12 +347,13 @@ async function handleStartFresh() {
 function renderRecover() {
   clear(app);
   const ta = h('textarea', { class: 'vs-textarea', placeholder: '24-word recovery key', rows: 3 });
-  const np = h('input', { class: 'vs-input', type: 'password', placeholder: 'New master password' });
-  const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Recover' });
+  const np = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'New master PIN' });
+  np.addEventListener('input', () => { if (np.value.length === 4) btn.click(); });
+  const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Recover & set new PIN' });
   btn.addEventListener('click', async () => {
-    if (np.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) return toast('New password too short', 'error');
+    if (np.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) return toast('New PIN too short', 'error');
     btn.disabled = true;
-    try { await vault.recoverWithMnemonic(ta.value); await vault.changeMasterPassword(np.value); cacheDek(vault.exportDek(), settings.autoLockTimeout); resetIdle(); toast('Recovered', 'success'); renderMain(); }
+    try { await vault.recoverWithMnemonic(ta.value); await vault.changeMasterPassword(np.value); cacheDek(vault.exportDek(), settings.autoLockTimeout); resetIdle(); toast('Recovered successfully', 'success'); renderMain(); }
     catch (e) { btn.disabled = false; toast(e.code === 'DECRYPTION_FAILED' ? 'Recovery key did not match' : 'Invalid recovery key', 'error'); }
   });
   app.append(screen('Recover vault', h('div', { class: 'vs-field' }, ta), h('div', { class: 'vs-field' }, np), btn,
@@ -245,11 +375,26 @@ function renderMain() {
     h('div', { style: 'display:flex;gap:8px;align-items:center' },
       syncBtn,
       iconBtn(I.dots, 'Menu', renderMainMenu)));
+  const folders = [...new Set(vault.getEntries().map(x => x.folder).filter(Boolean))].sort();
+  const tabsList = ['all', 'password', 'totp', 'favorites', ...folders];
+  const tabLabels = { all: 'All', password: 'Logins', totp: 'Auth', favorites: '★' };
+
   const tabs = h('div', { class: 'okey-tabs' },
-    ...['all', 'password', 'totp', 'favorites'].map((t) => h('button', { class: 'okey-tab', 'aria-selected': String(view.tab === t), text: { all: 'All', password: 'Logins', totp: 'Auth', favorites: '★' }[t], onclick: () => { view.tab = t; renderMain(); } })));
+    ...tabsList.map((t) => h('button', {
+      class: 'okey-tab',
+      'aria-selected': String(view.tab === t),
+      text: tabLabels[t] || t,
+      onclick: () => { view.tab = t; renderMain(); }
+    })));
   const body = h('main', { class: 'okey-body' });
   const fab = h('button', { class: 'okey-fab', html: '+', title: 'Add', onclick: () => renderEdit(null) });
-  app.append(header, h('div', { class: 'okey-searchbar' }, search), tabs, body, fab);
+  
+  const updateBanner = backendVersionMismatch
+    ? h('div', { class: 'okey-warn', style: 'margin: 8px 12px; font-weight: 600;', text: 'WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code.' })
+    : null;
+  const dashPanel = renderHomeDashboard();
+
+  app.append(...[header, updateBanner, dashPanel, h('div', { class: 'okey-searchbar' }, search), tabs, body, fab].filter(Boolean));
   search.addEventListener('input', () => list(body, search.value));
   list(body, '');
 }
@@ -317,7 +462,27 @@ function startGlobalTotpTicker() {
 
 function list(body, q) {
   clear(body);
-  let entries = q ? vault.search(q) : vault.getEntries(view.tab === 'favorites' ? { favoritesOnly: true } : view.tab === 'all' ? {} : { type: view.tab });
+  let entries = vault.getEntries();
+  if (view.tab === 'favorites') {
+    entries = entries.filter((e) => e.isFavorite);
+  } else if (view.tab === 'totp') {
+    entries = entries.filter((e) => e.entryType === 'totp' || (e.totpSecret && typeof e.totpSecret === 'string' && e.totpSecret.trim().length > 0));
+  } else if (view.tab === 'password') {
+    entries = entries.filter((e) => e.entryType === 'password');
+  } else if (view.tab !== 'all') {
+    entries = entries.filter((e) => e.folder === view.tab);
+  }
+
+  if (q) {
+    const queryStr = q.trim().toLowerCase();
+    entries = entries.filter((e) =>
+      [e.domain, e.siteName, e.nickname, e.username, ...(e.tags || [])]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(queryStr)
+    );
+  }
   body.append(selectToolbar(body, q));
   if (!entries.length) return body.append(h('div', { class: 'okey-empty', text: q ? 'No matches' : 'No items yet. Tap + to add.' }));
   entries.forEach((e) => {
@@ -399,9 +564,15 @@ function renderDetail(id) {
   if (e.folder) fields.append(field('Folder', e.folder, false));
   if (e.notes) fields.append(field('Notes', e.notes, false));
   (e.customFields || []).forEach((f) => fields.append(field(f.label, f.value, true)));
+  const pinBtn = iconBtn(I.pin, e.isPinned ? 'Unpin' : 'Pin', async () => {
+    await vault.updateEntry(id, { isPinned: !e.isPinned }); toast(e.isPinned ? 'Unpinned' : 'Pinned', 'success'); scheduleSync(); renderDetail(id);
+  });
+  if (e.isPinned) pinBtn.style.color = 'var(--vs-brand)';
+
   app.append(h('div', { class: 'okey-view' },
     appbar(e.nickname || e.siteName || getDisplayDomain(e.domain), renderMain,
       iconBtn(e.isFavorite ? '★' : '☆', 'Favorite', async () => { await vault.updateEntry(id, { isFavorite: !e.isFavorite }); scheduleSync(); renderDetail(id); }),
+      pinBtn,
       iconBtn(I.trash, 'Delete', async () => { if (confirm('Delete this item?')) { await vault.deleteEntry(id); scheduleSync(); renderMain(); } })),
     fields,
     h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-top:12px', text: 'Edit', onclick: () => renderEdit(id) })));
@@ -437,7 +608,7 @@ function totpField(secret) {
 function renderEdit(id) {
   clearInterval(totpTimer);
   const editing = !!id;
-  const e = editing ? vault.getEntry(id) : { siteName: '', domain: '', folder: '', username: '', password: '', totpSecret: '', notes: '', tags: [], customFields: [], entryType: ENTRY_TYPES.PASSWORD };
+  const e = editing ? vault.getEntry(id) : { siteName: '', domain: '', folder: '', username: '', password: '', totpSecret: '', notes: '', tags: [], displayOrder: 0, customFields: [], entryType: ENTRY_TYPES.PASSWORD };
   clear(app);
   const siteName = inp('Site name', e.siteName, true, 'e.g. GitHub');
   const domain = inp('Domain', e.domain, true, 'github.com');
@@ -476,6 +647,8 @@ function renderEdit(id) {
   const totp = inp('TOTP secret', e.totpSecret, false, 'Base32 (optional)');
   const notes = h('textarea', { class: 'vs-textarea', placeholder: 'Notes (optional)' }); notes.value = e.notes || '';
   const tags = inp('Tags', (e.tags || []).join(', '), false, 'comma separated');
+  const displayOrder = inp('Display order', String(e.displayOrder || 0), false, '0');
+  displayOrder.input.type = 'number';
   const customWrap = h('div', {});
   (e.customFields || []).forEach((c) => customWrap.append(customRow(c)));
   const save = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: editing ? 'Save' : 'Add item' });
@@ -485,6 +658,7 @@ function renderEdit(id) {
       password: pw.value, totpSecret: totp.value.replace(/\s+/g, ''), notes: notes.value,
       folder: chosenFolder,
       tags: (tags.value || '').split(',').map((x) => x.trim()).filter(Boolean),
+      displayOrder: Number(displayOrder.value) || 0,
       customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({ label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
       entryType: totp.value.trim() && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD };
     if (!data.siteName && !data.domain) return toast('Add a site name or domain', 'error');
@@ -498,6 +672,7 @@ function renderEdit(id) {
     totp.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Notes', h('span', { class: 'vs-optional', text: '(optional)' })), notes),
     tags.field,
+    displayOrder.field,
     h('div', { class: 'vs-field' }, h('label', { class: 'vs-label' }, 'Custom fields', h('span', { class: 'vs-optional', text: '(optional)' })), customWrap,
       h('button', { class: 'vs-btn vs-btn-ghost vs-btn-sm', text: '+ Add field', onclick: () => customWrap.append(customRow()) })),
     save));
@@ -527,19 +702,27 @@ function renderGenerator() {
 function renderChangeMasterPassword() {
   clear(app);
   view.name = 'change-password';
-  const currentPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Current master password' });
-  const newPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'New master password' });
-  const confirmNewPw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Confirm new master password' });
+  const currentPw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Current master PIN' });
+  const newPw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'New master PIN' });
+  const confirmNewPw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Confirm new master PIN' });
   const meter = strengthMeter();
-  newPw.addEventListener('input', () => meter.update(newPw.value));
+  
+  currentPw.addEventListener('input', () => { if (currentPw.value.length === 4) newPw.focus(); });
+  newPw.addEventListener('input', () => {
+    meter.update(newPw.value);
+    if (newPw.value.length === 4) confirmNewPw.focus();
+  });
+  confirmNewPw.addEventListener('input', () => {
+    if (confirmNewPw.value.length === 4 && newPw.value === confirmNewPw.value) submitBtn.click();
+  });
 
-  const submitBtn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Change Password' });
+  const submitBtn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Change PIN' });
   submitBtn.addEventListener('click', async () => {
     if (newPw.value.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
-      return toast(`New password must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} characters`, 'error');
+      return toast(`New PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`, 'error');
     }
     if (newPw.value !== confirmNewPw.value) {
-      return toast('New passwords do not match', 'error');
+      return toast('New PINs do not match', 'error');
     }
     submitBtn.disabled = true;
     submitBtn.textContent = 'Updating…';
@@ -550,21 +733,27 @@ function renderChangeMasterPassword() {
 
       await vault.changeMasterPassword(newPw.value);
       cacheDek(vault.exportDek(), settings.autoLockTimeout);
-      toast('Master password changed successfully', 'success');
+
+      if (await sync.getActiveProfile()) {
+        const c = await store.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
+        await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] }).catch(() => {});
+      }
+
+      toast('Master PIN changed successfully', 'success');
       renderSettings();
       await doSync();
     } catch (e) {
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Change Password';
-      toast(e.code === 'DECRYPTION_FAILED' ? 'Incorrect current master password' : e.message, 'error');
+      submitBtn.textContent = 'Change PIN';
+      toast(e.code === 'DECRYPTION_FAILED' ? 'Incorrect current master PIN' : e.message, 'error');
     }
   });
 
   app.append(h('div', { class: 'okey-view' },
-    appbar('Change Password', renderSettings),
-    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Current Password' }), currentPw),
-    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'New Password' }), newPw, meter.el),
-    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Confirm New Password' }), confirmNewPw),
+    appbar('Change PIN', renderSettings),
+    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Current PIN' }), currentPw),
+    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'New PIN' }), newPw, meter.el),
+    h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Confirm New PIN' }), confirmNewPw),
     submitBtn
   ));
   requestAnimationFrame(() => currentPw.focus());
@@ -572,21 +761,98 @@ function renderChangeMasterPassword() {
 
 // ============================ settings ============================
 async function renderSettings() {
+  view.name = 'settings';
+  if (await sync.getActiveProfile()) {
+    try {
+      const remote = await sync.pullSettings();
+      if (remote) {
+        settings = { ...settings, ...remote };
+        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        applyTheme(settings.theme);
+      }
+    } catch (e) {
+      console.error("Failed to pull and merge remote settings:", e);
+    }
+  }
+
   clear(app);
   const themeSel = h('select', { class: 'vs-select' }, ...['system', 'dark', 'light'].map((t) => h('option', { value: t, selected: settings.theme === t }, t)));
   themeSel.addEventListener('change', () => { saveSettings({ theme: themeSel.value }); applyTheme(themeSel.value); });
   const clientId = h('input', { class: 'vs-input', value: getGoogleClientId(), placeholder: 'Google OAuth Client ID' });
   const sheetUrl = h('input', { class: 'vs-input', value: (await sync.getActiveProfile())?.appsScriptUrl || '', placeholder: 'Apps Script /exec URL' });
+
+  // Health check status widget
+  const healthWidget = h('div', { class: 'okey-health-widget vs-glass', style: 'padding: 8px 12px; margin-top: 8px; border-radius: 8px; font-size: 11px; border: 1px solid var(--vs-border);' },
+    h('div', { style: 'display:flex; align-items:center; gap:6px; font-weight:600;' },
+      h('span', { class: 'okey-health-dot', style: 'width:8px; height:8px; border-radius:50%; background:#9ca3af;' }),
+      h('span', { class: 'okey-health-status-text', text: 'Checking connection...' })
+    ),
+    h('div', { class: 'okey-health-details vs-faint', style: 'margin-top: 6px; display:none; line-height: 1.4;' })
+  );
+
+  clearTimeout(healthTimer);
+  const pollHealth = async () => {
+    if (view.name !== 'settings') {
+      clearTimeout(healthTimer);
+      return;
+    }
+    const profile = await sync.getActiveProfile();
+    if (!profile?.appsScriptUrl) {
+      const dot = healthWidget.querySelector('.okey-health-dot');
+      const text = healthWidget.querySelector('.okey-health-status-text');
+      const details = healthWidget.querySelector('.okey-health-details');
+      if (dot && text && details) {
+        dot.style.background = '#9ca3af';
+        text.textContent = 'Offline (No vault connected)';
+        details.style.display = 'none';
+      }
+      return;
+    }
+
+    try {
+      const res = await sync._call('health');
+      if (res && res.status === 'ok') {
+        const dot = healthWidget.querySelector('.okey-health-dot');
+        const text = healthWidget.querySelector('.okey-health-status-text');
+        const details = healthWidget.querySelector('.okey-health-details');
+        if (dot && text && details) {
+          dot.style.background = 'var(--vs-success)';
+          text.textContent = 'Active (Connected)';
+          details.style.display = 'block';
+          clear(details);
+          details.append(
+            h('div', {}, `Apps Script: v${res.version || '1.0.0'}`),
+            h('div', {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
+            h('div', { style: 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || 'N/A'}`)
+          );
+        }
+      }
+    } catch (e) {
+      const dot = healthWidget.querySelector('.okey-health-dot');
+      const text = healthWidget.querySelector('.okey-health-status-text');
+      const details = healthWidget.querySelector('.okey-health-details');
+      if (dot && text && details) {
+        dot.style.background = 'var(--vs-error)';
+        text.textContent = `Offline (${e.message || 'Connection failed'})`;
+        details.style.display = 'none';
+      }
+    }
+    healthTimer = setTimeout(pollHealth, 20000);
+  };
+  pollHealth();
+
   app.append(h('div', { class: 'okey-view' }, appbar('Settings', renderMain),
     group('Security',
       numberSetting('Auto-lock (seconds)', settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => saveSettings({ autoLockTimeout: v })),
       numberSetting('Clipboard clear (seconds)', settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => saveSettings({ clipboardClearTimeout: v })),
-      h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Change master password' }), h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: 'Change', onclick: renderChangeMasterPassword })),
+      h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Change master PIN' }), h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: 'Change', onclick: renderChangeMasterPassword })),
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Theme' }), themeSel)),
     group('Sync (optional)',
       h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Google OAuth Client ID' }), clientId),
       h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Apps Script URL' }), sheetUrl),
-      h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Connect & sync', onclick: async () => {
+      h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Connect & sync', onclick: async (ev) => {
+        const b = ev.currentTarget;
+        b.disabled = true; b.textContent = 'Syncing...';
         try {
           setGoogleClientId(clientId.value.trim());
           const existing = await sync.getActiveProfile();
@@ -594,14 +860,23 @@ async function renderSettings() {
           else await sync.addProfile({ label: 'My Vault', appsScriptUrl: sheetUrl.value.trim() });
           await doSync();
         } catch (e) { toast(e.message, 'error'); }
-      } })),
+        finally { b.disabled = false; b.textContent = 'Connect & sync'; }
+      } }),
+      healthWidget),
     group('Recovery', h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', text: 'Regenerate recovery key', onclick: async () => {
       const { recoveryMnemonic } = await vault.regenerateRecovery(); renderRecoveryReveal(recoveryMnemonic, renderSettings);
     } })),
     group('Backup',
+      h('div', { class: 'okey-warn', style: 'font-weight: 600; margin-bottom: 12px;' }, 'WARNING: This JSON file contains your real, unencrypted passwords. Store it securely and delete the file immediately after use.'),
+      h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-bottom:8px', onclick: async () => {
+        const recs = await vault.exportRecords();
+        const c = await store.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
+        download('okey-backup.json', IE.exportOkeyBackup({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY], records: recs }));
+      } }, h('span', { html: I.export }), 'Encrypted OKey backup (.json)'),
+      h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-bottom:8px', onclick: () => download('okey-export.json', IE.exportBitwardenJson(vault.getEntries())) }, h('span', { html: I.export }), 'Plaintext JSON (Bitwarden)'),
       h('div', { class: 'vs-row' },
-        h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Export CSV', onclick: () => download('okey-export.csv', IE.exportCsv(vault.getEntries())) }),
-        h('label', { class: 'vs-btn vs-btn-secondary vs-spacer' }, 'Import', h('input', { type: 'file', accept: '.csv,.json,.txt', style: 'display:none', onchange: importFile })))),
+        h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', onclick: () => download('okey-export.csv', IE.exportCsv(vault.getEntries())) }, h('span', { html: I.export }), 'Plaintext CSV'),
+        h('label', { class: 'vs-btn vs-btn-secondary vs-spacer', style: 'margin:0;cursor:pointer;' }, h('span', { html: I.import }), 'Import', h('input', { type: 'file', accept: '.csv,.json,.txt', style: 'display:none', onchange: importFile })))),
     group('Vault',
       h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', text: 'Password generator', onclick: renderGenerator }),
       h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px', text: 'Lock now', onclick: () => { vault.lock(); clearSession(); renderLocked(); } }),
@@ -620,15 +895,25 @@ async function importFile(ev) {
 
 // ---------- sync ----------
 let syncDebounce = null;
-function scheduleSync() { clearTimeout(syncDebounce); syncDebounce = setTimeout(() => sync.getActiveProfile().then((p) => p && sync.sync(vault).catch(() => {})), 8000); }
+function scheduleSync() { clearTimeout(syncDebounce); syncDebounce = setTimeout(() => sync.getActiveProfile().then((p) => p && sync.sync(vault).then(() => refreshDashboardAfterSync()).catch(() => {})), 8000); }
 async function doSync() {
   toast('Syncing…', 'info');
   try {
+    const remoteMeta = await sync.fetchMetadata();
     const c = await store.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
-    await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
+    
+    if (remoteMeta && remoteMeta.salt) {
+      if (remoteMeta.salt !== c[STORAGE_KEYS.VAULT_SALT]) {
+        return toast('Vault mismatch! Sheet belongs to a different vault.', 'error');
+      }
+    } else {
+      await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
+    }
+
     const r = await sync.sync(vault);
     await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {});
+    await refreshDashboardAfterSync().catch(() => {});
     toast(`Synced · ↑${r.pushed} ↓${r.pulled} (${vault.getEntries().length})`, 'success');
   } catch (e) { toast(`Sync failed: ${e.message}`, 'error'); }
 }
@@ -654,7 +939,7 @@ function toggleRow(label, checked, onchange) {
 }
 function group(title, ...children) { return h('div', { class: 'okey-settings-group' }, h('div', { class: 'okey-section-title', text: title }), ...children); }
 function strengthMeter() {
-  const bars = [1, 2, 3, 4, 5].map(() => h('span', { class: 'vs-strength-bar' }));
+  const bars = [1, 2, 3, 4].map(() => h('span', { class: 'vs-strength-bar' }));
   const el = h('div', { class: 'vs-strength', 'data-level': '0' }, ...bars);
   return { el, update: (pw) => el.setAttribute('data-level', String(analyzePassword(pw).level)) };
 }
@@ -745,17 +1030,97 @@ async function renderAnalytics() {
   ));
 
   try {
-    const data = await sync.fetchAnalytics();
+    let cachedData = null;
+    const cached = await store.get([STORAGE_KEYS.BACKEND_ANALYTICS, STORAGE_KEYS.ANALYTICS_CACHE_TIME]);
+    const cacheTime = cached[STORAGE_KEYS.ANALYTICS_CACHE_TIME] || 0;
+    const now = Date.now();
+    if (cached[STORAGE_KEYS.BACKEND_ANALYTICS] && (now - cacheTime) < 3 * 60 * 1000) {
+      cachedData = cached[STORAGE_KEYS.BACKEND_ANALYTICS];
+    }
+
+    let data;
+    if (cachedData) {
+      data = cachedData;
+    } else {
+      data = await sync.fetchAnalytics();
+      await store.set({
+        [STORAGE_KEYS.BACKEND_ANALYTICS]: data,
+        [STORAGE_KEYS.ANALYTICS_CACHE_TIME]: now
+      });
+    }
+
     clear(content);
     const types = data.entryTypes || {};
     const folders = data.folders || {};
-    
+
+    const typeCanvas = h('canvas', { style: 'max-width:100%; max-height:180px;' });
+    const folderCanvas = h('canvas', { style: 'max-width:100%; max-height:180px;' });
+
     content.append(
-      h('div', { class: 'okey-section-title', text: 'By Type' }),
-      ...Object.entries(types).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v }))),
-      h('div', { class: 'okey-section-title', style: 'margin-top:16px', text: 'By Folder' }),
-      ...Object.entries(folders).map(([k, v]) => h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: k })), h('b', { text: v })))
+      h('div', { class: 'okey-section-title', text: 'Entry Types' }),
+      h('div', { style: 'margin: 12px 0; display:flex; justify-content:center;' }, typeCanvas),
+      h('div', { class: 'okey-section-title', style: 'margin-top:20px', text: 'Folder Distribution' }),
+      h('div', { style: 'margin: 12px 0;' }, folderCanvas)
     );
+
+    const ChartModule = await import('chart.js/auto');
+    const Chart = ChartModule.Chart || ChartModule.default;
+
+    const typeLabels = Object.keys(types);
+    const typeValues = Object.values(types);
+    const folderLabels = Object.keys(folders);
+    const folderValues = Object.values(folders);
+
+    if (typeLabels.length > 0) {
+      new Chart(typeCanvas, {
+        type: 'doughnut',
+        data: {
+          labels: typeLabels,
+          datasets: [{
+            data: typeValues,
+            backgroundColor: ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'],
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'bottom', labels: { color: 'var(--vs-text)' } }
+          }
+        }
+      });
+    } else {
+      typeCanvas.replaceWith(h('div', { class: 'vs-faint', style: 'text-align:center; padding:10px;', text: 'No type data available' }));
+    }
+
+    if (folderLabels.length > 0) {
+      new Chart(folderCanvas, {
+        type: 'bar',
+        data: {
+          labels: folderLabels,
+          datasets: [{
+            label: 'Items',
+            data: folderValues,
+            backgroundColor: '#2563eb',
+            borderWidth: 1
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          plugins: {
+            legend: { display: false }
+          },
+          scales: {
+            x: { ticks: { color: 'var(--vs-text)' }, grid: { color: 'var(--vs-border)' } },
+            y: { ticks: { color: 'var(--vs-text)' }, grid: { color: 'var(--vs-border)' } }
+          }
+        }
+      });
+    } else {
+      folderCanvas.replaceWith(h('div', { class: 'vs-faint', style: 'text-align:center; padding:10px;', text: 'No folder data available' }));
+    }
+
   } catch (e) {
     clear(content);
     content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch analytics: ' + e.message }));

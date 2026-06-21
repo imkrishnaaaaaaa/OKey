@@ -25,6 +25,8 @@ var MSG = Object.freeze({
 var APP = Object.freeze({
   NAME: "OKey",
   VERSION: "1.0.0",
+  APPSCRIPT_VERSION: "1.0.0",
+  SCHEMA_VERSION: "1.0.0",
   /** Bumped when the at-rest vault container format changes. */
   VAULT_FORMAT_VERSION: 2,
   /** Bumped when an individual entry's schema changes. */
@@ -65,7 +67,10 @@ var SECURITY = Object.freeze({
   MIN_CLIPBOARD_CLEAR_SECONDS: 10,
   MAX_CLIPBOARD_CLEAR_SECONDS: 120,
   IDLE_DETECTION_INTERVAL: 15,
-  MIN_MASTER_PASSWORD_LENGTH: 10
+  MIN_MASTER_PASSWORD_LENGTH: 4,
+  // 4-digit PIN
+  MAX_FAILED_UNLOCKS: 30,
+  WARN_FAILED_UNLOCKS: 25
 });
 var SYNC = Object.freeze({
   DEFAULT_INTERVAL_MINUTES: 1440,
@@ -146,7 +151,13 @@ var STORAGE_KEYS = Object.freeze({
   BIOMETRIC_WRAPPED: "okey_biometric_wrapped",
   SCHEMA_MIGRATED: "okey_schema_migrated",
   CACHED_FOLDERS: "okey_cached_folders",
-  FOLDERS_CACHE_TIME: "okey_folders_cache_time"
+  FOLDERS_CACHE_TIME: "okey_folders_cache_time",
+  FAILED_UNLOCK_ATTEMPTS: "okey_failed_unlocks",
+  BACKEND_VERSION_MISMATCH: "okey_backend_version_mismatch",
+  BACKEND_CAPABILITIES: "okey_backend_capabilities",
+  BACKEND_DASHBOARD: "okey_backend_dashboard",
+  BACKEND_ANALYTICS: "okey_backend_analytics",
+  ANALYTICS_CACHE_TIME: "okey_analytics_cache_time"
 });
 var LEGACY_STORAGE_KEYS = Object.freeze({
   vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,
@@ -3947,6 +3958,44 @@ var Vault = class {
     return { recoveryMnemonic };
   }
   /**
+   * Initialize local storage from a remote sheet's key material and test decryption.
+   * @param {string} masterPassword 
+   * @param {Object} metadata The salt, wrappedMaster, and kdfParams from the sheet
+   * @param {Array} entries The encrypted entries from the sheet
+   */
+  async restoreFromRemote(masterPassword, metadata, entries) {
+    if (!metadata || !metadata.salt || !metadata.wrappedMaster) {
+      throw new ValidationError("Remote vault does not contain valid key material");
+    }
+    const salt = base64ToBytes(metadata.salt);
+    const kdfParams = metadata.kdfParams;
+    const { kek } = await deriveKek(masterPassword, salt, kdfParams);
+    let dek;
+    try {
+      dek = await unwrapKeyMaterial(metadata.wrappedMaster, kek);
+    } catch (e) {
+      secureWipe(kek);
+      throw new DecryptionError("Incorrect master password for the remote vault");
+    }
+    secureWipe(kek);
+    this._dek = dek;
+    this._dekKey = await importAesKey(dek, false);
+    this._salt = salt;
+    this._kdfParams = kdfParams;
+    this._unlocked = true;
+    this._payloadCache.clear();
+    this._entries = await this._decryptRecords(entries || []);
+    await this.storage.set({
+      [STORAGE_KEYS.VAULT_SALT]: metadata.salt,
+      [STORAGE_KEYS.KDF_PARAMS]: kdfParams,
+      [STORAGE_KEYS.WRAPPED_BY_MASTER]: metadata.wrappedMaster,
+      [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: metadata.wrappedRecovery || "",
+      [STORAGE_KEYS.VAULT_DATA]: entries || [],
+      [STORAGE_KEYS.VAULT_METADATA]: { formatVersion: metadata.formatVersion || APP.VAULT_FORMAT_VERSION, createdAt: nowIso() },
+      [STORAGE_KEYS.SETUP_COMPLETE]: true
+    });
+  }
+  /**
    * Unlock with the master password.
    * @param {string} masterPassword
    * @returns {Promise<void>}
@@ -3955,15 +4004,31 @@ var Vault = class {
   async unlock(masterPassword) {
     const c = await this._loadContainer();
     if (!c.salt || !c.wrappedMaster) throw new ValidationError("Vault is not initialized");
+    const fails = await this.storage.get(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS) || 0;
+    if (fails >= SECURITY.MAX_FAILED_UNLOCKS) {
+      throw new Error(`Too many incorrect attempts. Vault has been reset for your security.`);
+    }
     const { kek } = await deriveKek(masterPassword, c.salt, c.kdfParams);
     let dek;
     try {
       dek = await unwrapKeyMaterial(c.wrappedMaster, kek);
     } catch (e) {
       secureWipe(kek);
-      throw new DecryptionError("Incorrect master password");
+      const newFails = fails + 1;
+      await this.storage.set({ [STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS]: newFails });
+      if (newFails >= SECURITY.MAX_FAILED_UNLOCKS) {
+        const keys = [...Object.values(STORAGE_KEYS), ...Object.keys(LEGACY_STORAGE_KEYS)];
+        await this.storage.remove(keys);
+        throw new DecryptionError(`Too many incorrect attempts. Vault has been completely wiped for security.`);
+      } else if (newFails >= SECURITY.WARN_FAILED_UNLOCKS) {
+        throw new DecryptionError(`Incorrect master PIN. WARNING: ${SECURITY.MAX_FAILED_UNLOCKS - newFails} attempts remaining before vault is wiped!`);
+      }
+      throw new DecryptionError("Incorrect master PIN");
     }
     secureWipe(kek);
+    if (fails > 0) {
+      await this.storage.remove(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS);
+    }
     await this._activateWithDek(dek, c);
   }
   /**
@@ -4373,8 +4438,8 @@ function payloadFields(entry) {
   };
 }
 function assertStrongPassword(pw) {
-  if (typeof pw !== "string" || pw.length < 10) {
-    throw new ValidationError("Master password must be at least 10 characters");
+  if (typeof pw !== "string" || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
+    throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
 }
 
@@ -4566,8 +4631,67 @@ var SyncEngine = class {
   }
   /** Pull user settings from the Sheet. */
   async pullSettings() {
-    const r = await this._call("getSettings", {});
+    const r = await this._call("settings", {});
     return r.settings || {};
+  }
+  /** Check version compatibility. */
+  async checkVersion() {
+    try {
+      const r = await this._call("version", {});
+      return {
+        backendVersion: r.version,
+        backendSchema: r.schemaVersion,
+        localVersion: APP.APPSCRIPT_VERSION,
+        localSchema: APP.SCHEMA_VERSION,
+        mismatch: r.version !== APP.APPSCRIPT_VERSION || r.schemaVersion !== APP.SCHEMA_VERSION
+      };
+    } catch (e) {
+      if (e.code === "NO_PROFILE") return { mismatch: false };
+      throw e;
+    }
+  }
+  /**
+   * Fetch vault metadata (salt, kdfParams, wrappedMaster) from a sheet without needing an active profile.
+   * Useful for "Restore from Sheet" flow and validating before blind sync.
+   * @param {string} [explicitUrl] Optional URL. If omitted, uses the active profile.
+   */
+  async fetchMetadata(explicitUrl) {
+    let url = explicitUrl;
+    if (!url) {
+      const profile = await this.getActiveProfile();
+      if (!profile?.appsScriptUrl) throw new SyncError("No vault sheet configured", "NO_PROFILE");
+      url = profile.appsScriptUrl;
+    }
+    const trimmedUrl = url.trim();
+    if (!/^https:\/\/script\.google\.com\//.test(trimmedUrl)) {
+      throw new SyncError("Apps Script URL must start with https://script.google.com/", "BAD_URL");
+    }
+    const token = await this.network.getAuthToken();
+    const endpoint = `${trimmedUrl}?action=metadata`;
+    let res;
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      res = await this.network.fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({})
+      });
+    } catch (e) {
+      throw new SyncError(`Network error: ${e.message}`, "NETWORK");
+    }
+    if (!res.ok) throw new SyncError(`Server returned HTTP ${res.status}`, "HTTP");
+    const json = await res.json();
+    if (json.status !== "ok") throw new SyncError(json.message || "Failed to fetch metadata", json.code || "REMOTE");
+    return json.metadata || {};
+  }
+  /** Fetch Vault Dashboard Stats. */
+  async fetchDashboard() {
+    return this._call("dashboard", {});
+  }
+  /** Fetch Vault Analytics Stats. */
+  async fetchAnalytics() {
+    return this._call("analytics", {});
   }
   /**
    * Perform a delta sync for the given vault.

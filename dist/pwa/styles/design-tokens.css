@@ -23,7 +23,7 @@
   --vs-radius-md: 12px;
   --vs-radius-lg: 16px;
   --vs-radius-xl: 22px;
-  --vs-radius-pill: 999px;
+  --vs-radius-pill: var(--vs-radius-md);
 
   /* Spacing */
   --vs-space-1: 4px;

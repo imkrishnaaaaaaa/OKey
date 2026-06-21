@@ -1,7 +1,7 @@
 {
   "name": "okey",
   "version": "1.0.0",
-  "description": "OKey — One Key to rule them all. Privacy-first, zero-knowledge password manager (Chrome MV3 extension + mobile PWA) backed by your own Google Sheet.",
+  "description": "OKey — A premium zero-knowledge password & 2FA manager backed by your own Google Sheet.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@scure/bip39": "^1.6.0",
+    "chart.js": "^4.5.1",
     "hash-wasm": "^4.12.0"
   }
 }

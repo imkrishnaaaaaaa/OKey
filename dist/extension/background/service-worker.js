@@ -3885,6 +3885,9 @@ function validateEntry(entry) {
   if (entry.entryType === ENTRY_TYPES.TOTP && !entry.totpSecret) {
     throw new ValidationError("Authenticator entries require a TOTP secret");
   }
+  if (entry.entryType === ENTRY_TYPES.PASSWORD && !entry.password && !entry.totpSecret) {
+    throw new ValidationError("At least Password or TOTP field must be entered");
+  }
   return true;
 }
 
@@ -4195,6 +4198,27 @@ var Vault = class {
     const e = this._entries.find((x) => x.id === id && !x.isDeleted);
     return e ? deepClone(e) : null;
   }
+  _checkDuplicateName(siteName, excludeId = null) {
+    const trimmed = (siteName || "").trim().toLowerCase();
+    if (!trimmed) return;
+    const exists = this._entries.some(
+      (e) => !e.isDeleted && e.id !== excludeId && (e.siteName || "").trim().toLowerCase() === trimmed
+    );
+    if (exists) {
+      throw new ValidationError("Name already exists");
+    }
+  }
+  _checkDuplicateCredential(domain, username, excludeId = null) {
+    const normDomain = (domain || "").trim().toLowerCase();
+    const normUser = (username || "").trim().toLowerCase();
+    if (!normDomain || !normUser) return;
+    const exists = this._entries.some(
+      (e) => !e.isDeleted && e.id !== excludeId && (e.domain || "").trim().toLowerCase() === normDomain && (e.username || "").trim().toLowerCase() === normUser
+    );
+    if (exists) {
+      throw new ValidationError("A credential with this domain and username already exists");
+    }
+  }
   /** @param {Partial<import('./schema.js').VaultEntry>} data */
   async addEntry(data) {
     this._assertUnlocked();
@@ -4207,6 +4231,8 @@ var Vault = class {
       nowIso
     );
     validateEntry(entry);
+    this._checkDuplicateName(entry.siteName);
+    this._checkDuplicateCredential(entry.domain, entry.username);
     this._entries.push(entry);
     await this._persist();
     return deepClone(entry);
@@ -4219,6 +4245,8 @@ var Vault = class {
     merged.updatedAt = nowIso();
     merged.version = e.version + 1;
     validateEntry(merged);
+    this._checkDuplicateName(merged.siteName, id);
+    this._checkDuplicateCredential(merged.domain, merged.username, id);
     Object.assign(e, merged);
     await this._persist();
     return deepClone(e);

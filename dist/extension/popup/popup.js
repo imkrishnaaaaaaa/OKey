@@ -18413,6 +18413,9 @@ function validateEntry(entry) {
   if (entry.entryType === ENTRY_TYPES.TOTP && !entry.totpSecret) {
     throw new ValidationError("Authenticator entries require a TOTP secret");
   }
+  if (entry.entryType === ENTRY_TYPES.PASSWORD && !entry.password && !entry.totpSecret) {
+    throw new ValidationError("At least Password or TOTP field must be entered");
+  }
   return true;
 }
 
@@ -18735,6 +18738,27 @@ var Vault = class {
     const e = this._entries.find((x) => x.id === id && !x.isDeleted);
     return e ? deepClone(e) : null;
   }
+  _checkDuplicateName(siteName, excludeId = null) {
+    const trimmed = (siteName || "").trim().toLowerCase();
+    if (!trimmed) return;
+    const exists = this._entries.some(
+      (e) => !e.isDeleted && e.id !== excludeId && (e.siteName || "").trim().toLowerCase() === trimmed
+    );
+    if (exists) {
+      throw new ValidationError("Name already exists");
+    }
+  }
+  _checkDuplicateCredential(domain, username, excludeId = null) {
+    const normDomain = (domain || "").trim().toLowerCase();
+    const normUser = (username || "").trim().toLowerCase();
+    if (!normDomain || !normUser) return;
+    const exists = this._entries.some(
+      (e) => !e.isDeleted && e.id !== excludeId && (e.domain || "").trim().toLowerCase() === normDomain && (e.username || "").trim().toLowerCase() === normUser
+    );
+    if (exists) {
+      throw new ValidationError("A credential with this domain and username already exists");
+    }
+  }
   /** @param {Partial<import('./schema.js').VaultEntry>} data */
   async addEntry(data) {
     this._assertUnlocked();
@@ -18747,6 +18771,8 @@ var Vault = class {
       nowIso
     );
     validateEntry(entry);
+    this._checkDuplicateName(entry.siteName);
+    this._checkDuplicateCredential(entry.domain, entry.username);
     this._entries.push(entry);
     await this._persist();
     return deepClone(entry);
@@ -18759,6 +18785,8 @@ var Vault = class {
     merged.updatedAt = nowIso();
     merged.version = e.version + 1;
     validateEntry(merged);
+    this._checkDuplicateName(merged.siteName, id);
+    this._checkDuplicateCredential(merged.domain, merged.username, id);
     Object.assign(e, merged);
     await this._persist();
     return deepClone(e);
@@ -19543,7 +19571,21 @@ function normalizeDomain(input) {
 }
 function getDisplayDomain(url) {
   try {
-    return new URL(url.includes("://") ? url : "https://" + url).hostname.replace(/^www\./, "");
+    let host = new URL(url.includes("://") ? url : "https://" + url).hostname.toLowerCase();
+    host = host.replace(/^www\./, "").replace(/\.$/, "");
+    const parts = host.split(".");
+    if (parts.length <= 2) return host;
+    const lastTwo = parts.slice(-2).join(".");
+    if (MULTI_LEVEL_SUFFIXES.has(lastTwo)) {
+      if (parts.length >= 4) {
+        return parts.slice(0, -2).join(".");
+      }
+      return host;
+    }
+    if (parts.length >= 3) {
+      return parts.slice(0, -1).join(".");
+    }
+    return host;
   } catch {
     return url;
   }
@@ -20664,8 +20706,21 @@ function startGlobalTotpTicker() {
   tick();
   totpTimer = setInterval(tick, 1e3);
 }
+function getEntrySubText(e) {
+  const titleText = e.nickname || e.siteName || "";
+  if (e.domain) {
+    const dispDomain = getDisplayDomain(e.domain);
+    if (!titleText || titleText.toLowerCase() !== dispDomain.toLowerCase()) {
+      return dispDomain;
+    }
+  }
+  if (e.entryType === ENTRY_TYPES.TOTP && !e.domain) {
+    return "Authenticator";
+  }
+  return "";
+}
 function entryRow(entry, confidence) {
-  const sub = entry.username || getDisplayDomain(entry.domain) || (entry.entryType === ENTRY_TYPES.TOTP ? "Authenticator" : "");
+  const sub = getEntrySubText(entry);
   const actions = h("div", { class: "okey-entry-actions" });
   if (entry.username) actions.append(iconBtn(ICONS.user, "Copy username", (ev) => {
     ev.stopPropagation();
@@ -21685,24 +21740,168 @@ async function renderDashboard() {
     viewHeader("Dashboard", renderMain),
     content
   ));
+  let data = null;
+  let health = null;
+  let pingInfo = null;
+  let offlineQueue = [];
+  let connected = false;
   try {
-    const data = await sync.fetchDashboard();
-    clear(content);
-    content.append(
+    const queueData = await local.get(STORAGE_KEYS.OFFLINE_QUEUE).catch(() => ({}));
+    offlineQueue = queueData[STORAGE_KEYS.OFFLINE_QUEUE] || [];
+    const res = await Promise.all([
+      sync.fetchDashboard().catch((err) => {
+        console.error(err);
+        return null;
+      }),
+      sync._call("health").catch((err) => {
+        console.error(err);
+        return null;
+      }),
+      sync.ping().catch((err) => {
+        console.error(err);
+        return null;
+      })
+    ]);
+    data = res[0];
+    health = res[1];
+    pingInfo = res[2];
+    if (data || health || pingInfo) {
+      connected = true;
+    }
+  } catch (e) {
+    console.error("Dashboard fetch error:", e);
+  }
+  clear(content);
+  const profile = await sync.getActiveProfile();
+  const fallbackUrl = profile?.sheetId ? `https://docs.google.com/spreadsheets/d/${profile.sheetId}/edit` : profile?.appsScriptUrl || "";
+  const statusBadge = h(
+    "div",
+    {
+      class: "vs-glass",
+      style: "padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);"
+    },
+    h(
+      "div",
+      { style: "display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;" },
+      h("span", { style: "font-weight:600; font-size:13px;" }, "Vault Status"),
       h(
         "div",
-        { class: "okey-stat-grid" },
-        statBox("Total Items", data.totalEntries || 0),
-        statBox("Active Items", data.activeEntries || 0),
-        statBox("Folders", data.folders || 0),
-        statBox("Deleted", data.deletedEntries || 0)
+        { style: "display:flex; align-items:center; gap:6px;" },
+        h("span", {
+          style: `width:8px; height:8px; border-radius:50%; background:${connected ? "var(--vs-success)" : "var(--vs-danger, #ef4444)"}; display:inline-block; animation: vs-pulse 1.5s infinite;`
+        }),
+        h("span", {
+          style: `font-size:11px; font-weight:700; color:${connected ? "var(--vs-success)" : "var(--vs-danger, #ef4444)"};`,
+          text: connected ? "ONLINE" : "OFFLINE"
+        })
+      )
+    ),
+    h(
+      "div",
+      { style: "font-size:11px; display:flex; flex-direction:column; gap:4px;" },
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Google Account:" }),
+        h("span", { style: "font-weight:500;", text: connected ? pingInfo?.email || health?.email || "Connected" : "Offline" })
       ),
-      h("div", { class: "vs-faint", style: "margin-top:16px; text-align:center", text: `Last Backend Sync: ${data.lastSync ? formatTimeAgo(data.lastSync) : "Never"}` })
-    );
-  } catch (e) {
-    clear(content);
-    content.append(h("div", { class: "vs-faint", style: "margin-top: 20px", text: "Unable to fetch dashboard: " + e.message }));
-  }
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between; align-items:center;" },
+        h("span", { class: "vs-faint", text: "Spreadsheet:" }),
+        connected && health?.sheetUrl || fallbackUrl ? h("a", {
+          href: health?.sheetUrl || fallbackUrl,
+          target: "_blank",
+          style: "color:var(--vs-brand); text-decoration:none; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block;",
+          text: "Open Spreadsheet \u2197"
+        }) : h("span", { class: "vs-faint", text: "N/A" })
+      )
+    )
+  );
+  const localVer = APP.VERSION;
+  const targetBackendVer = APP.APPSCRIPT_VERSION;
+  const actualBackendVer = health?.version || (connected ? "1.0.0" : "Unknown");
+  const isMismatch = connected && actualBackendVer !== targetBackendVer;
+  const versionCard = h(
+    "div",
+    {
+      class: "vs-glass",
+      style: `padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid ${isMismatch ? "var(--vs-danger, #ef4444)" : "var(--vs-border)"};`
+    },
+    h("div", { style: "font-weight:600; font-size:12px; margin-bottom:8px;", text: "Version Alignment" }),
+    h(
+      "div",
+      { style: "font-size:11px; display:flex; flex-direction:column; gap:4px;" },
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Client App Version:" }),
+        h("span", { style: "font-weight:500;", text: `v${localVer}` })
+      ),
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Apps Script Backend:" }),
+        h("span", {
+          style: `font-weight:500; color:${isMismatch ? "var(--vs-danger, #ef4444)" : "inherit"};`,
+          text: connected ? `v${actualBackendVer}` : "Offline"
+        })
+      ),
+      isMismatch ? h("div", {
+        style: "color:var(--vs-danger, #ef4444); font-size:10px; margin-top:6px; font-weight:600; text-align:center;",
+        text: `\u26A0\uFE0F Version Mismatch! Expected backend v${targetBackendVer}. Please redeploy Apps Script.`
+      }) : null
+    )
+  );
+  const lastSyncText = data?.lastSync ? formatTimeAgo(data.lastSync) : "Never";
+  const syncInfoCard = h(
+    "div",
+    {
+      class: "vs-glass",
+      style: "padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);"
+    },
+    h("div", { style: "font-weight:600; font-size:12px; margin-bottom:8px;", text: "Synchronization & Data" }),
+    h(
+      "div",
+      { style: "font-size:11px; display:flex; flex-direction:column; gap:4px;" },
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Un-synced changes queue:" }),
+        h("span", {
+          style: `font-weight:600; color:${offlineQueue.length > 0 ? "var(--vs-warning, #f59e0b)" : "inherit"};`,
+          text: `${offlineQueue.length} batch(es)`
+        })
+      ),
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Last Sync Timestamp:" }),
+        h("span", { style: "font-weight:500;", text: lastSyncText })
+      ),
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Spreadsheet Database Size:" }),
+        h("span", { style: "font-weight:500;", text: connected ? `${health?.vaultEntries ?? 0} entries` : "Offline" })
+      ),
+      h(
+        "div",
+        { style: "display:flex; justify-content:space-between;" },
+        h("span", { class: "vs-faint", text: "Local Decrypted Size:" }),
+        h("span", { style: "font-weight:500;", text: `${vault.getEntries().length} entries` })
+      )
+    )
+  );
+  const statsGrid = h(
+    "div",
+    { class: "okey-stat-grid" },
+    statBox("Total Items", (connected ? data?.totalEntries : vault.getEntries().length) || 0),
+    statBox("Active Items", (connected ? data?.activeEntries : vault.getEntries().filter((e) => !e.isDeleted).length) || 0),
+    statBox("Folders", (connected ? data?.folders : [...new Set(vault.getEntries().map((e) => e.folder).filter(Boolean))].length) || 0),
+    statBox("Deleted", (connected ? data?.deletedEntries : vault.getEntries().filter((e) => e.isDeleted).length) || 0)
+  );
+  content.append(statusBadge, versionCard, syncInfoCard, statsGrid);
 }
 async function renderAnalytics() {
   view.name = "analytics";

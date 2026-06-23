@@ -138,15 +138,24 @@ body {
 .okey-entry {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border-radius: var(--vs-radius-md);
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(109, 94, 252, 0.05); /* lighter shade of main brand purple color */
+  border: 1px solid rgba(109, 94, 252, 0.1);
+  border-radius: var(--vs-radius-lg, 12px);
+  margin-bottom: 8px;
   cursor: pointer;
-  transition: background var(--vs-dur);
+  transition: background var(--vs-dur), border-color var(--vs-dur), transform 0.1s ease;
 }
 
 .okey-entry:hover {
-  background: var(--vs-bg-elev-2);
+  background: rgba(109, 94, 252, 0.09);
+  border-color: rgba(109, 94, 252, 0.25);
+  transform: translateY(-1px);
+}
+
+.okey-entry:active {
+  transform: translateY(0);
 }
 
 .okey-entry-main {
@@ -157,6 +166,7 @@ body {
 .okey-entry-title {
   font-weight: 600;
   font-size: var(--vs-fs-md);
+  color: var(--vs-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -165,6 +175,8 @@ body {
 .okey-entry-sub {
   font-size: var(--vs-fs-sm);
   color: var(--vs-text-muted);
+  opacity: 0.65; /* dimmed color */
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -563,8 +575,8 @@ body {
 /* Floating Lock button */
 .okey-lock-fab {
   position: fixed;
-  right: 16px;
-  bottom: 50px;
+  right: 60px;
+  bottom: 60px;
   width: 38px;
   height: 38px;
   border-radius: var(--vs-radius-pill);

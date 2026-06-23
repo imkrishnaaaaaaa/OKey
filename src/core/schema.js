@@ -110,5 +110,9 @@ export function validateEntry(entry) {
   if (entry.entryType === ENTRY_TYPES.TOTP && !entry.totpSecret) {
     throw new ValidationError('Authenticator entries require a TOTP secret');
   }
+  if (entry.entryType === ENTRY_TYPES.PASSWORD && !entry.password && !entry.totpSecret) {
+    throw new ValidationError('At least Password or TOTP field must be entered');
+  }
   return true;
 }
+

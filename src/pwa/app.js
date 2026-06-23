@@ -12,7 +12,7 @@ import { generatePassword, generatePassphrase, analyzePassword } from '../core/p
 import { generateTOTP, isValidTotpSecret } from '../core/totp.js';
 import { normalizeDomain, getDisplayDomain } from '../core/domain-matcher.js';
 import { formatTimeAgo } from '../core/util.js';
-import { DEFAULT_SETTINGS, STORAGE_KEYS, LEGACY_STORAGE_KEYS, ENTRY_TYPES, FAVICON, SECURITY } from '../core/constants.js';
+import { APP, DEFAULT_SETTINGS, STORAGE_KEYS, LEGACY_STORAGE_KEYS, ENTRY_TYPES, FAVICON, SECURITY } from '../core/constants.js';
 import * as IE from '../core/import-export.js';
 import { IndexedDbAdapter } from './lib/idb-adapter.js';
 import { pwaNetwork, setGoogleClientId, getGoogleClientId } from './lib/network.js';
@@ -475,6 +475,20 @@ function startGlobalTotpTicker() {
   totpTimer = setInterval(tick, 1000);
 }
 
+function getEntrySubText(e) {
+  const titleText = e.nickname || e.siteName || '';
+  if (e.domain) {
+    const dispDomain = getDisplayDomain(e.domain);
+    if (!titleText || titleText.toLowerCase() !== dispDomain.toLowerCase()) {
+      return dispDomain;
+    }
+  }
+  if (e.entryType === ENTRY_TYPES.TOTP && !e.domain) {
+    return 'Authenticator';
+  }
+  return '';
+}
+
 function list(body, q) {
   clear(body);
   let entries = vault.getEntries();
@@ -526,7 +540,7 @@ function list(body, q) {
         onclick: (ev) => { ev.stopPropagation(); selected.has(e.id) ? selected.delete(e.id) : selected.add(e.id); list(body, q); } }) : avatar(e),
       h('div', { class: 'okey-entry-main' },
         h('div', { class: 'okey-entry-title', text: e.nickname || e.siteName || getDisplayDomain(e.domain) || 'Untitled' }),
-        h('div', { class: 'okey-entry-sub', text: e.username || getDisplayDomain(e.domain) || (e.entryType === ENTRY_TYPES.TOTP ? 'Authenticator' : '') }),
+        h('div', { class: 'okey-entry-sub', text: getEntrySubText(e) }),
         totpEl),
       actions
     );
@@ -1031,7 +1045,6 @@ function renderMainMenu(ev) {
   document.body.append(ov);
 }
 
-// ============================ DASHBOARD & ANALYTICS ============================
 async function renderDashboard() {
   view.name = 'dashboard';
   clear(app);
@@ -1042,28 +1055,150 @@ async function renderDashboard() {
     content
   ));
 
+  let data = null;
+  let health = null;
+  let pingInfo = null;
+  let offlineQueue = [];
+  let connected = false;
+
   try {
-    const data = await sync.fetchDashboard();
-    clear(content);
-    content.append(
-      h('div', { class: 'okey-stat-grid' },
-        statBox('Total Items', data.totalEntries || 0),
-        statBox('Active Items', data.activeEntries || 0),
-        statBox('Folders', data.folders || 0),
-        statBox('Deleted', data.deletedEntries || 0)
-      ),
-      h('div', { class: 'vs-faint', style: 'margin-top:16px; text-align:center', text: `Last Backend Sync: ${data.lastSync ? formatTimeAgo(data.lastSync) : 'Never'}` })
-    );
+    const queueData = await store.get(STORAGE_KEYS.OFFLINE_QUEUE).catch(() => ({}));
+    offlineQueue = queueData[STORAGE_KEYS.OFFLINE_QUEUE] || [];
+
+    const res = await Promise.all([
+      sync.fetchDashboard().catch(err => { console.error(err); return null; }),
+      sync._call('health').catch(err => { console.error(err); return null; }),
+      sync.ping().catch(err => { console.error(err); return null; })
+    ]);
+
+    data = res[0];
+    health = res[1];
+    pingInfo = res[2];
+
+    if (data || health || pingInfo) {
+      connected = true;
+    }
   } catch (e) {
-    clear(content);
-    content.append(h('div', { class: 'vs-faint', style: 'margin-top: 20px', text: 'Unable to fetch dashboard: ' + e.message }));
+    console.error("Dashboard fetch error:", e);
   }
+
+  clear(content);
+
+  const profile = await sync.getActiveProfile();
+  const fallbackUrl = profile?.sheetId 
+    ? `https://docs.google.com/spreadsheets/d/${profile.sheetId}/edit` 
+    : (profile?.appsScriptUrl || '');
+
+  // Connection badge & details container
+  const statusBadge = h('div', { 
+    class: 'vs-glass', 
+    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);' 
+  },
+    h('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;' },
+      h('span', { style: 'font-weight:600; font-size:13px;' }, 'Vault Status'),
+      h('div', { style: 'display:flex; align-items:center; gap:6px;' },
+        h('span', { 
+          style: `width:8px; height:8px; border-radius:50%; background:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'}; display:inline-block; animation: vs-pulse 1.5s infinite;` 
+        }),
+        h('span', { 
+          style: `font-size:11px; font-weight:700; color:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'};`, 
+          text: connected ? 'ONLINE' : 'OFFLINE' 
+        })
+      )
+    ),
+    h('div', { style: 'font-size:11px; display:flex; flex-direction:column; gap:4px;' },
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Google Account:' }),
+        h('span', { style: 'font-weight:500;', text: connected ? (pingInfo?.email || health?.email || 'Connected') : 'Offline' })
+      ),
+      h('div', { style: 'display:flex; justify-content:space-between; align-items:center;' },
+        h('span', { class: 'vs-faint', text: 'Spreadsheet:' }),
+        (connected && health?.sheetUrl) || fallbackUrl
+          ? h('a', { 
+              href: health?.sheetUrl || fallbackUrl, 
+              target: '_blank', 
+              style: 'color:var(--vs-brand); text-decoration:none; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block;', 
+              text: 'Open Spreadsheet ↗' 
+            })
+          : h('span', { class: 'vs-faint', text: 'N/A' })
+      )
+    )
+  );
+
+  // Version status card
+  const localVer = APP.VERSION;
+  const targetBackendVer = APP.APPSCRIPT_VERSION;
+  const actualBackendVer = health?.version || (connected ? '1.0.0' : 'Unknown');
+  const isMismatch = connected && actualBackendVer !== targetBackendVer;
+
+  const versionCard = h('div', { 
+    class: 'vs-glass', 
+    style: `padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid ${isMismatch ? 'var(--vs-danger, #ef4444)' : 'var(--vs-border)'};` 
+  },
+    h('div', { style: 'font-weight:600; font-size:12px; margin-bottom:8px;', text: 'Version Alignment' }),
+    h('div', { style: 'font-size:11px; display:flex; flex-direction:column; gap:4px;' },
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Client App Version:' }),
+        h('span', { style: 'font-weight:500;', text: `v${localVer}` })
+      ),
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Apps Script Backend:' }),
+        h('span', { 
+          style: `font-weight:500; color:${isMismatch ? 'var(--vs-danger, #ef4444)' : 'inherit'};`, 
+          text: connected ? `v${actualBackendVer}` : 'Offline' 
+        })
+      ),
+      isMismatch ? h('div', { 
+        style: 'color:var(--vs-danger, #ef4444); font-size:10px; margin-top:6px; font-weight:600; text-align:center;', 
+        text: `⚠️ Version Mismatch! Expected backend v${targetBackendVer}. Please redeploy Apps Script.` 
+      }) : null
+    )
+  );
+
+  // Sync delta information card
+  const lastSyncText = data?.lastSync ? formatTimeAgo(data.lastSync) : 'Never';
+  const syncInfoCard = h('div', { 
+    class: 'vs-glass', 
+    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);' 
+  },
+    h('div', { style: 'font-weight:600; font-size:12px; margin-bottom:8px;', text: 'Synchronization & Data' }),
+    h('div', { style: 'font-size:11px; display:flex; flex-direction:column; gap:4px;' },
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Un-synced changes queue:' }),
+        h('span', { 
+          style: `font-weight:600; color:${offlineQueue.length > 0 ? 'var(--vs-warning, #f59e0b)' : 'inherit'};`, 
+          text: `${offlineQueue.length} batch(es)` 
+        })
+      ),
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Last Sync Timestamp:' }),
+        h('span', { style: 'font-weight:500;', text: lastSyncText })
+      ),
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Spreadsheet Database Size:' }),
+        h('span', { style: 'font-weight:500;', text: connected ? `${health?.vaultEntries ?? 0} entries` : 'Offline' })
+      ),
+      h('div', { style: 'display:flex; justify-content:space-between;' },
+        h('span', { class: 'vs-faint', text: 'Local Decrypted Size:' }),
+        h('span', { style: 'font-weight:500;', text: `${vault.getEntries().length} entries` })
+      )
+    )
+  );
+
+  // Stats Grid
+  const statsGrid = h('div', { class: 'okey-stat-grid' },
+    statBox('Total Items', (connected ? data?.totalEntries : vault.getEntries().length) || 0),
+    statBox('Active Items', (connected ? data?.activeEntries : vault.getEntries().filter(e => !e.isDeleted).length) || 0),
+    statBox('Folders', (connected ? data?.folders : [...new Set(vault.getEntries().map(e => e.folder).filter(Boolean))].length) || 0),
+    statBox('Deleted', (connected ? data?.deletedEntries : vault.getEntries().filter(e => e.isDeleted).length) || 0)
+  );
+
+  content.append(statusBadge, versionCard, syncInfoCard, statsGrid);
 }
 
 async function renderAnalytics() {
   view.name = 'analytics';
   clear(app);
-  
   const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading analytics...' });
   app.append(h('div', { class: 'okey-view' },
     appbar('Analytics', renderMain),

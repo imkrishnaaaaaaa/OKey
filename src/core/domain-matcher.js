@@ -63,7 +63,25 @@ export function normalizeDomain(input) {
 /** Friendly hostname for display. */
 export function getDisplayDomain(url) {
   try {
-    return new URL(url.includes('://') ? url : 'https://' + url).hostname.replace(/^www\./, '');
+    let host = new URL(url.includes('://') ? url : 'https://' + url).hostname.toLowerCase();
+    host = host.replace(/^www\./, '').replace(/\.$/, '');
+    
+    const parts = host.split('.');
+    if (parts.length <= 2) return host;
+
+    const lastTwo = parts.slice(-2).join('.');
+    if (MULTI_LEVEL_SUFFIXES.has(lastTwo)) {
+      if (parts.length >= 4) {
+        return parts.slice(0, -2).join('.');
+      }
+      return host;
+    }
+
+    if (parts.length >= 3) {
+      return parts.slice(0, -1).join('.');
+    }
+
+    return host;
   } catch {
     return url;
   }

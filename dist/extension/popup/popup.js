@@ -14649,6 +14649,7 @@ var FAVICON = Object.freeze({
 });
 var DEFAULT_SETTINGS = Object.freeze({
   autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
+  miniAutoLockTimeout: 300,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -14657,6 +14658,8 @@ var DEFAULT_SETTINGS = Object.freeze({
   showRecents: true,
   recentsMaxCount: 10,
   faviconsEnabled: true,
+  autoSubmitEnabled: false,
+  autoFillSingleMatch: false,
   theme: "system",
   passwordGeneratorDefaults: {
     length: PASSWORD_GEN.DEFAULT_LENGTH,
@@ -18987,6 +18990,9 @@ function assertStrongPassword(pw) {
   if (typeof pw !== "string" || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
     throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
+  if (!/^\d+$/.test(pw)) {
+    throw new ValidationError("Master PIN must contain only digits");
+  }
 }
 
 // src/core/sync.js
@@ -19767,6 +19773,7 @@ var MSG = Object.freeze({
   // Vault lifecycle (status is derived from session presence)
   VAULT_LOCKED: "VAULT_LOCKED",
   LOCK_VAULT: "LOCK_VAULT",
+  UNLOCK_VAULT: "UNLOCK_VAULT",
   // Settings
   GET_SETTINGS: "GET_SETTINGS",
   UPDATE_SETTINGS: "UPDATE_SETTINGS",
@@ -19782,50 +19789,113 @@ var MSG = Object.freeze({
   GET_SITE_CREDENTIALS: "GET_SITE_CREDENTIALS",
   FILL_CREDENTIAL: "FILL_CREDENTIAL",
   OPEN_POPUP: "OPEN_POPUP",
-  TOUCH_SESSION: "TOUCH_SESSION"
+  TOUCH_SESSION: "TOUCH_SESSION",
+  ADD_CREDENTIAL: "ADD_CREDENTIAL",
+  // Autofill session tracking
+  SET_ACTIVE_FILLING_SESSION: "SET_ACTIVE_FILLING_SESSION",
+  GET_ACTIVE_FILLING_SESSION: "GET_ACTIVE_FILLING_SESSION",
+  CLEAR_ACTIVE_FILLING_SESSION: "CLEAR_ACTIVE_FILLING_SESSION"
 });
 
 // src/extension/lib/session.js
 var K = {
   DEK: "okey_session_dek",
   EXPIRY: "okey_session_expiry",
+  MINI_EXPIRY: "okey_session_mini_expiry",
   VIEW: "okey_session_view",
   POPUP_OPEN: "okey_popup_open"
 };
-async function cacheDek(dekBytes, autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
-  const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
+async function cacheDek(dekBytes, autoLockSeconds) {
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings2 = sStore["okey_settings"] || {};
+  const extSeconds = clamp(settings2.autoLockTimeout || autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
+  const miniSeconds = Number(settings2.miniAutoLockTimeout) || 300;
+  const now = Date.now();
   await chrome.storage.session.set({
     [K.DEK]: bytesToBase64(dekBytes),
-    [K.EXPIRY]: Date.now() + seconds * 1e3
+    [K.EXPIRY]: now + extSeconds * 1e3,
+    [K.MINI_EXPIRY]: now + miniSeconds * 1e3
   });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
+  const delaySeconds = Math.min(extSeconds, miniSeconds);
+  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delaySeconds / 60 });
 }
-async function touchSession(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
-  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
+async function touchSession(type = "extension") {
+  let viewType = type;
+  if (typeof type === "number") {
+    viewType = "extension";
+  }
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings2 = sStore["okey_settings"] || {};
+  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   if (!s[K.DEK]) return false;
-  if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
+  const now = Date.now();
+  const exp = s[K.EXPIRY] || 0;
+  const miniExp = s[K.MINI_EXPIRY] || 0;
+  if (now >= exp && now >= miniExp) {
     await clearSession();
     return false;
   }
+  const autoLockSeconds = viewType === "mini" ? settings2.miniAutoLockTimeout || 300 : settings2.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS;
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
+  const newExpiry = now + seconds * 1e3;
+  const update = {};
+  if (viewType === "mini") {
+    update[K.MINI_EXPIRY] = newExpiry;
+  } else {
+    update[K.EXPIRY] = newExpiry;
+  }
+  await chrome.storage.session.set(update);
+  const finalExp = viewType === "mini" ? exp : newExpiry;
+  const finalMiniExp = viewType === "mini" ? newExpiry : miniExp;
+  const nextTarget = [];
+  if (finalExp > now) nextTarget.push(finalExp);
+  if (finalMiniExp > now) nextTarget.push(finalMiniExp);
+  if (nextTarget.length > 0) {
+    const earliest = Math.min(...nextTarget);
+    const delayMinutes = Math.max(0.1, (earliest - now) / 6e4);
+    await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delayMinutes });
+  }
   return true;
 }
-async function getCachedDek(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
-  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
+async function getCachedDek(type = "extension") {
+  let viewType = type;
+  if (typeof type === "number") {
+    viewType = "extension";
+  }
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings2 = sStore["okey_settings"] || {};
+  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   if (!s[K.DEK]) return null;
-  if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
-    await clearSession();
+  const now = Date.now();
+  const expiryKey = viewType === "mini" ? K.MINI_EXPIRY : K.EXPIRY;
+  const exp = s[expiryKey] || 0;
+  if (exp && now >= exp) {
+    const otherExpiryKey = viewType === "mini" ? K.EXPIRY : K.MINI_EXPIRY;
+    const otherExp = s[otherExpiryKey] || 0;
+    if (now >= otherExp) {
+      await clearSession();
+    }
     return null;
   }
+  const autoLockSeconds = viewType === "mini" ? settings2.miniAutoLockTimeout || 300 : settings2.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS;
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
+  const newExpiry = now + seconds * 1e3;
+  const update = { [expiryKey]: newExpiry };
+  await chrome.storage.session.set(update);
+  const finalExp = viewType === "mini" ? s[K.EXPIRY] || 0 : newExpiry;
+  const finalMiniExp = viewType === "mini" ? newExpiry : s[K.MINI_EXPIRY] || 0;
+  const nextTarget = [];
+  if (finalExp > now) nextTarget.push(finalExp);
+  if (finalMiniExp > now) nextTarget.push(finalMiniExp);
+  if (nextTarget.length > 0) {
+    const earliest = Math.min(...nextTarget);
+    const delayMinutes = Math.max(0.1, (earliest - now) / 6e4);
+    await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delayMinutes });
+  }
   return base64ToBytes(s[K.DEK]);
 }
 async function clearSession() {
-  await chrome.storage.session.remove([K.DEK, K.EXPIRY]);
+  await chrome.storage.session.remove([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   await chrome.alarms.clear(SYNC.AUTO_LOCK_ALARM);
 }
 async function saveViewState(state) {
@@ -19851,7 +19921,6 @@ var settings = { ...DEFAULT_SETTINGS };
 var currentSite = { url: "", title: "", domain: "" };
 var view = { name: "loading", tab: "all", entryId: null };
 var totpTimer = null;
-var healthTimer = null;
 var selectMode = false;
 var selected = /* @__PURE__ */ new Set();
 var lastActivityTouch = 0;
@@ -19874,7 +19943,7 @@ async function loadStartupData() {
     if (view.name === "main") {
       renderMain();
     }
-    const [ver, cfg, dash] = await Promise.all([
+    const [ver, cfg, dash, remoteSettings, health] = await Promise.all([
       sync.checkVersion().catch((err) => {
         console.error("Version check error:", err);
         return null;
@@ -19885,6 +19954,14 @@ async function loadStartupData() {
       }),
       sync.fetchDashboard().catch((err) => {
         console.error("Dashboard fetch error:", err);
+        return null;
+      }),
+      sync.pullSettings().catch((err) => {
+        console.error("Settings pull error:", err);
+        return null;
+      }),
+      sync._call("health").catch((err) => {
+        console.error("Health check error:", err);
         return null;
       })
     ]);
@@ -19899,6 +19976,16 @@ async function loadStartupData() {
     if (dash) {
       dashboardData = dash;
       await local.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+    }
+    if (remoteSettings) {
+      settings = { ...settings, ...remoteSettings };
+      await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+      await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {
+      });
+      if (typeof applyTheme === "function") applyTheme(settings.theme);
+    }
+    if (health) {
+      await local.set({ "okey_backend_health": health });
     }
     if (view.name === "main") {
       renderMain();
@@ -19921,28 +20008,6 @@ async function refreshDashboardAfterSync() {
     console.error("Failed to refresh dashboard stats after sync:", e);
   }
 }
-function renderHomeDashboard() {
-  if (!dashboardData) return null;
-  const lastSyncText = dashboardData.lastSync ? formatTimeAgo(dashboardData.lastSync) : "Never";
-  return h(
-    "div",
-    { class: "okey-home-dashboard vs-glass", style: "padding:12px; margin: 0 12px 12px 12px; border-radius:12px; font-size:12px; border:1px solid var(--vs-border);" },
-    h(
-      "div",
-      { style: "display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:center; font-weight:bold; margin-bottom: 8px;" },
-      h("div", {}, h("div", { style: "font-size:15px; color:var(--vs-brand);" }, dashboardData.activeEntries ?? 0), h("div", { class: "vs-faint", style: "font-size:9px;" }, "Active")),
-      h("div", {}, h("div", { style: "font-size:15px; color:var(--vs-success);" }, dashboardData.pinnedEntries ?? 0), h("div", { class: "vs-faint", style: "font-size:9px;" }, "Pinned")),
-      h("div", {}, h("div", { style: "font-size:15px; color:var(--vs-warning);" }, dashboardData.folders ?? 0), h("div", { class: "vs-faint", style: "font-size:9px;" }, "Folders")),
-      h("div", {}, h("div", { style: "font-size:15px; color:var(--vs-text-muted);" }, dashboardData.deletedEntries ?? 0), h("div", { class: "vs-faint", style: "font-size:9px;" }, "Deleted"))
-    ),
-    h(
-      "div",
-      { style: "display:flex; justify-content:space-between; font-size:10px; border-top: 1px solid var(--vs-border); padding-top:6px;" },
-      h("span", { class: "vs-faint" }, `Total Items: ${dashboardData.totalEntries ?? 0}`),
-      h("span", { class: "vs-faint" }, `Synced: ${lastSyncText}`)
-    )
-  );
-}
 function updateSyncUI(status) {
   syncStatus = status;
   const dot = document.querySelector(".okey-sync-dot");
@@ -19963,6 +20028,11 @@ function h(tag2, props = {}, ...kids) {
   for (const kid of kids.flat()) {
     if (kid == null || kid === false) continue;
     e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  if (tag2 === "input" && e.getAttribute("inputmode") === "numeric" && e.getAttribute("maxlength") === "4") {
+    e.addEventListener("input", () => {
+      e.value = e.value.replace(/[^0-9]/g, "").slice(0, 4);
+    });
   }
   return e;
 }
@@ -20099,7 +20169,7 @@ async function boot() {
   chrome.runtime.onMessage.addListener((m) => {
     if (m.type === MSG.VAULT_LOCKED) {
       vault.lock();
-      renderLocked({ overlay: true });
+      renderLocked();
     }
   });
   const state = await vault.getState();
@@ -20342,11 +20412,10 @@ function renderRecoveryReveal(mnemonic, done) {
   ));
   cont.addEventListener("click", done);
 }
-function renderLocked({ overlay = false } = {}) {
+function renderLocked() {
   clearInterval(totpTimer);
   document.getElementById("okey-lock-overlay")?.remove();
   hideFloatingLock();
-  const useOverlay = overlay && app.childElementCount > 0;
   const pw = h("input", { class: "vs-input okey-lock-input", type: "password", inputmode: "numeric", pattern: "[0-9]*", maxlength: 4, placeholder: "Master PIN", autofocus: true });
   const btn = h("button", { class: "vs-btn vs-btn-primary vs-btn-block", text: "Unlock" });
   const submit = async () => {
@@ -20357,12 +20426,7 @@ function renderLocked({ overlay = false } = {}) {
       await vault.unlock(pw.value);
       await cacheDek(vault.exportDek(), settings.autoLockTimeout);
       showFloatingLock();
-      const overlayEl = document.getElementById("okey-lock-overlay");
-      if (overlayEl) {
-        overlayEl.remove();
-      } else {
-        await restoreSavedView(await getViewState());
-      }
+      await restoreSavedView(await getViewState());
       maybeSyncOnUnlock();
       loadStartupData().catch((err) => console.error("loadStartupData error:", err));
     } catch (e) {
@@ -20384,18 +20448,15 @@ function renderLocked({ overlay = false } = {}) {
   btn.addEventListener("click", submit);
   const lockCard = h(
     "div",
-    { class: useOverlay ? "okey-lock-card vs-glass" : "okey-view okey-lock-full" },
+    { class: "okey-view okey-lock-full" },
     brandHeader(),
     h("div", { class: "vs-field" }, pw),
     btn,
     h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:10px", text: "Forgot PIN? Use recovery key", onclick: renderRecover }),
-    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:32px;color:var(--vs-danger);border:1px solid var(--vs-danger);opacity:0.8", text: "Reset vault & start fresh", onclick: handleStartFresh })
+    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:32px;color:white;border:1px solid var(--vs-danger);background:var(--vs-danger)", text: "Reset vault & start fresh", onclick: handleStartFresh })
   );
-  if (useOverlay) document.body.append(h("div", { class: "okey-lock-overlay", id: "okey-lock-overlay" }, lockCard));
-  else {
-    clear(app);
-    app.append(lockCard);
-  }
+  clear(app);
+  app.append(lockCard);
   requestAnimationFrame(() => pw.focus());
 }
 async function handleStartFresh() {
@@ -20479,8 +20540,7 @@ function renderMain() {
   const body = h("div", { class: "okey-body" });
   const footer = renderFooter();
   const updateBanner = backendVersionMismatch ? h("div", { class: "okey-warn", style: "margin: 8px 12px; font-weight: 600;", text: "WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code." }) : null;
-  const dashPanel = renderHomeDashboard();
-  app.append(...[header, updateBanner, dashPanel, tabs, body, footer].filter(Boolean));
+  app.append(...[header, updateBanner, tabs, body, footer].filter(Boolean));
   search.addEventListener("input", () => renderList(body, search.value));
   renderList(body, "");
 }
@@ -21011,27 +21071,47 @@ function renderGenerator(saved = null) {
   ));
   regen();
 }
-async function renderSettings(scrollTop = 0) {
+async function populateHealthWidget(healthWidget) {
+  const profile = await sync.getActiveProfile();
+  if (!profile?.appsScriptUrl) {
+    const dot2 = healthWidget.querySelector(".okey-health-dot");
+    const text2 = healthWidget.querySelector(".okey-health-status-text");
+    const details2 = healthWidget.querySelector(".okey-health-details");
+    if (dot2 && text2 && details2) {
+      dot2.style.background = "#9ca3af";
+      text2.textContent = "Offline (No vault connected)";
+      details2.style.display = "none";
+    }
+    return;
+  }
+  const cached = await local.get("okey_backend_health");
+  const res = cached["okey_backend_health"];
+  const dot = healthWidget.querySelector(".okey-health-dot");
+  const text = healthWidget.querySelector(".okey-health-status-text");
+  const details = healthWidget.querySelector(".okey-health-details");
+  if (dot && text && details) {
+    if (res && res.status === "ok") {
+      dot.style.background = "var(--vs-success)";
+      text.textContent = "Active (Connected)";
+      details.style.display = "block";
+      clear(details);
+      details.append(
+        h("div", {}, `Apps Script: v${res.version || "1.0.0"}`),
+        h("div", {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
+        h("div", { style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || "N/A"}`)
+      );
+    } else {
+      dot.style.background = "#9ca3af";
+      text.textContent = "Connection status cached at sync/launch";
+      details.style.display = "none";
+    }
+  }
+}
+function renderSettings(scrollTop = 0) {
   view.name = "settings";
   view.entryId = null;
   rememberView({ scrollTop });
-  if (await sync.getActiveProfile()) {
-    try {
-      const remote = await sync.pullSettings();
-      if (remote) {
-        settings = { ...settings, ...remote };
-        await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {
-        });
-        applyTheme(settings.theme);
-      }
-    } catch (e) {
-      console.error("Failed to pull and merge remote settings:", e);
-    }
-  }
   clear(app);
-  const profiles = await sync.getProfiles();
-  const lastSync = (await local.get(STORAGE_KEYS.LAST_SYNC_AT))[STORAGE_KEYS.LAST_SYNC_AT];
   const themeSel = h(
     "select",
     { class: "vs-select" },
@@ -21039,8 +21119,26 @@ async function renderSettings(scrollTop = 0) {
   );
   themeSel.addEventListener("change", () => updateSettings({ theme: themeSel.value }).then(() => applyTheme(themeSel.value)));
   const autoLock = numberSetting("Auto-lock (seconds)", settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => updateSettings({ autoLockTimeout: v }));
+  const miniAutoLockOptions = [
+    { text: "1m", value: 60 },
+    { text: "5m", value: 300 },
+    { text: "10m", value: 600 },
+    { text: "30m", value: 1800 },
+    { text: "1h", value: 3600 },
+    { text: "2h", value: 7200 },
+    { text: "6h", value: 21600 }
+  ];
+  const miniLockVal = settings.miniAutoLockTimeout || 300;
+  const miniLockSel = h(
+    "select",
+    { class: "vs-select", style: "width:90px" },
+    ...miniAutoLockOptions.map((opt) => h("option", { value: opt.value, selected: Number(miniLockVal) === opt.value }, opt.text))
+  );
+  miniLockSel.addEventListener("change", () => updateSettings({ miniAutoLockTimeout: Number(miniLockSel.value) }));
+  const miniLock = h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main" }, h("div", { text: "Mini-view auto-lock" })), miniLockSel);
   const clip = numberSetting("Clipboard clear (seconds)", settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => updateSettings({ clipboardClearTimeout: v }));
   const profileList = h("div", {});
+  const lastSyncLabel = h("div", { class: "vs-faint", style: "margin-top:6px", text: "Loading..." });
   const renderProfiles = (list) => {
     clear(profileList);
     if (!list.length) profileList.append(h("div", { class: "vs-faint", text: "No vault connected. Add one to enable sync." }));
@@ -21058,7 +21156,6 @@ async function renderSettings(scrollTop = 0) {
       })
     )));
   };
-  renderProfiles(profiles);
   const healthWidget = h(
     "div",
     { class: "okey-health-widget vs-glass", style: "padding: 8px 12px; margin-top: 8px; border-radius: 8px; font-size: 11px; border: 1px solid var(--vs-border);" },
@@ -21070,65 +21167,27 @@ async function renderSettings(scrollTop = 0) {
     ),
     h("div", { class: "okey-health-details vs-faint", style: "margin-top: 6px; display:none; line-height: 1.4;" })
   );
-  clearTimeout(healthTimer);
-  const pollHealth = async () => {
-    if (view.name !== "settings") {
-      clearTimeout(healthTimer);
-      return;
-    }
-    const profile = await sync.getActiveProfile();
-    if (!profile?.appsScriptUrl) {
-      const dot = healthWidget.querySelector(".okey-health-dot");
-      const text = healthWidget.querySelector(".okey-health-status-text");
-      const details = healthWidget.querySelector(".okey-health-details");
-      if (dot && text && details) {
-        dot.style.background = "#9ca3af";
-        text.textContent = "Offline (No vault connected)";
-        details.style.display = "none";
-      }
-      return;
-    }
-    try {
-      const res = await sync._call("health");
-      if (res && res.status === "ok") {
-        const dot = healthWidget.querySelector(".okey-health-dot");
-        const text = healthWidget.querySelector(".okey-health-status-text");
-        const details = healthWidget.querySelector(".okey-health-details");
-        if (dot && text && details) {
-          dot.style.background = "var(--vs-success)";
-          text.textContent = "Active (Connected)";
-          details.style.display = "block";
-          clear(details);
-          details.append(
-            h("div", {}, `Apps Script: v${res.version || "1.0.0"}`),
-            h("div", {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
-            h("div", { style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || "N/A"}`)
-          );
-        }
-      }
-    } catch (e) {
-      const dot = healthWidget.querySelector(".okey-health-dot");
-      const text = healthWidget.querySelector(".okey-health-status-text");
-      const details = healthWidget.querySelector(".okey-health-details");
-      if (dot && text && details) {
-        dot.style.background = "var(--vs-error)";
-        text.textContent = `Offline (${e.message || "Connection failed"})`;
-        details.style.display = "none";
-      }
-    }
-    healthTimer = setTimeout(pollHealth, 2e4);
-  };
-  pollHealth();
-  app.append(h(
+  const viewContainer = h(
     "div",
     { class: "okey-view" },
     viewHeader("Settings", renderMain),
     settingsGroup(
       "Security",
       autoLock,
+      miniLock,
       clip,
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main" }, h("div", { text: "Change master PIN" })), h("button", { class: "vs-btn vs-btn-secondary vs-btn-sm", text: "Change", onclick: changeMasterPasswordModal })),
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main" }, h("div", { text: "Theme" })), themeSel)
+    ),
+    settingsGroup(
+      "Autofill Preferences",
+      toggleRow("Auto-fill on single match", settings.autoFillSingleMatch, (v) => updateSettings({ autoFillSingleMatch: v })),
+      toggleRow("Auto-submit after fill", settings.autoSubmitEnabled, (v) => updateSettings({ autoSubmitEnabled: v })),
+      h(
+        "div",
+        { class: "vs-faint", style: "margin-top: 8px; font-size: 11px; line-height: 1.4;" },
+        `Tip: To prevent browser autofill popups from overlapping with OKey, disable the browser's built-in "Offer to save passwords" and "Autofill" settings.`
+      )
     ),
     settingsGroup(
       "Connected Sheets",
@@ -21136,7 +21195,7 @@ async function renderSettings(scrollTop = 0) {
       h(
         "div",
         { class: "vs-row", style: "margin-top:8px" },
-        h("button", { class: "vs-btn vs-btn-secondary vs-spacer", text: "Add vault sheet", onclick: () => addSheetModal(async () => renderSettings()) }),
+        h("button", { class: "vs-btn vs-btn-secondary vs-spacer", text: "Add vault sheet", onclick: () => addSheetModal(() => renderSettings()) }),
         h("button", { class: "vs-btn vs-btn-primary", text: "Sync now", onclick: async (ev) => {
           const b = ev.currentTarget;
           b.disabled = true;
@@ -21149,7 +21208,7 @@ async function renderSettings(scrollTop = 0) {
           }
         } })
       ),
-      h("div", { class: "vs-faint", style: "margin-top:6px", text: lastSync ? `Last synced ${formatTimeAgo(lastSync)}` : "Never synced" }),
+      lastSyncLabel,
       healthWidget
     ),
     settingsGroup(
@@ -21175,10 +21234,20 @@ async function renderSettings(scrollTop = 0) {
       } }),
       h("div", { class: "vs-faint", style: "text-align:center;margin-top:14px", text: "OKey 1.0.0 \xB7 zero-knowledge \xB7 Argon2id" })
     )
-  ));
+  );
+  app.append(viewContainer);
+  requestAnimationFrame(() => {
+    viewContainer.scrollTop = scrollTop || 0;
+  });
+  sync.getProfiles().then(renderProfiles).catch(console.error);
+  local.get(STORAGE_KEYS.LAST_SYNC_AT).then((res) => {
+    const lastSync = res[STORAGE_KEYS.LAST_SYNC_AT];
+    lastSyncLabel.textContent = lastSync ? `Last synced ${formatTimeAgo(lastSync)}` : "Never synced";
+  }).catch(console.error);
+  populateHealthWidget(healthWidget).catch(console.error);
 }
 function viewRecovery() {
-  const pw = h("input", { class: "vs-input", type: "password", placeholder: "Confirm master PIN" });
+  const pw = h("input", { class: "vs-input", type: "password", inputmode: "numeric", pattern: "[0-9]*", maxlength: 4, placeholder: "Confirm master PIN", autofocus: true });
   modal("Recovery key", [
     h("p", { class: "vs-muted", text: "Regenerate your 24-word recovery key. The old key will stop working." }),
     h("div", { class: "vs-field" }, pw),
@@ -21384,6 +21453,26 @@ async function doManualSync() {
     await sync.pushSettings(settings).catch(() => {
     });
     const r = await sync.sync(vault);
+    try {
+      const remote = await sync.pullSettings();
+      if (remote) {
+        settings = { ...settings, ...remote };
+        await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {
+        });
+        if (typeof applyTheme === "function") applyTheme(settings.theme);
+      }
+    } catch (e) {
+      console.error("Failed to pull settings after sync:", e);
+    }
+    try {
+      const health = await sync._call("health");
+      if (health) {
+        await local.set({ "okey_backend_health": health });
+      }
+    } catch (e) {
+      console.error("Failed to get health after sync:", e);
+    }
     await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {
     });
@@ -21420,6 +21509,22 @@ async function maybeSyncOnUnlock() {
       await sync.getFolders(true).catch(() => {
       });
       await refreshDashboardAfterSync().catch(() => {
+      });
+      sync.pullSettings().then(async (remote) => {
+        if (remote) {
+          settings = { ...settings, ...remote };
+          await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+          await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {
+          });
+          if (typeof applyTheme === "function") applyTheme(settings.theme);
+        }
+      }).catch(() => {
+      });
+      sync._call("health").then(async (health) => {
+        if (health) {
+          await local.set({ "okey_backend_health": health });
+        }
+      }).catch(() => {
       });
     }).catch(() => updateSyncUI("err"));
   }

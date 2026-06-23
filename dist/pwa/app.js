@@ -14649,6 +14649,7 @@ var FAVICON = Object.freeze({
 });
 var DEFAULT_SETTINGS = Object.freeze({
   autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
+  miniAutoLockTimeout: 300,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -14657,6 +14658,8 @@ var DEFAULT_SETTINGS = Object.freeze({
   showRecents: true,
   recentsMaxCount: 10,
   faviconsEnabled: true,
+  autoSubmitEnabled: false,
+  autoFillSingleMatch: false,
   theme: "system",
   passwordGeneratorDefaults: {
     length: PASSWORD_GEN.DEFAULT_LENGTH,
@@ -18987,6 +18990,9 @@ function assertStrongPassword(pw) {
   if (typeof pw !== "string" || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
     throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
+  if (!/^\d+$/.test(pw)) {
+    throw new ValidationError("Master PIN must contain only digits");
+  }
 }
 
 // src/core/sync.js
@@ -19742,7 +19748,6 @@ var settings = { ...DEFAULT_SETTINGS };
 var view = { name: "loading", tab: "all", id: null };
 var totpTimer = null;
 var idleTimer = null;
-var healthTimer = null;
 var selectMode = false;
 var selected = /* @__PURE__ */ new Set();
 var backendVersionMismatch = false;
@@ -19763,7 +19768,7 @@ async function loadStartupData() {
     if (view.name === "main") {
       renderMain();
     }
-    const [ver, cfg, dash] = await Promise.all([
+    const [ver, cfg, dash, remoteSettings, health] = await Promise.all([
       sync.checkVersion().catch((err) => {
         console.error("Version check error:", err);
         return null;
@@ -19774,6 +19779,14 @@ async function loadStartupData() {
       }),
       sync.fetchDashboard().catch((err) => {
         console.error("Dashboard fetch error:", err);
+        return null;
+      }),
+      sync.pullSettings().catch((err) => {
+        console.error("Settings pull error:", err);
+        return null;
+      }),
+      sync._call("health").catch((err) => {
+        console.error("Health check error:", err);
         return null;
       })
     ]);
@@ -19788,6 +19801,14 @@ async function loadStartupData() {
     if (dash) {
       dashboardData = dash;
       await store.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+    }
+    if (remoteSettings) {
+      settings = { ...settings, ...remoteSettings };
+      await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+      if (typeof applyTheme === "function") applyTheme(settings.theme);
+    }
+    if (health) {
+      await store.set({ "okey_backend_health": health });
     }
     if (view.name === "main") {
       renderMain();
@@ -19843,6 +19864,11 @@ function h(tag2, props = {}, ...kids) {
   for (const kid of kids.flat()) {
     if (kid == null || kid === false) continue;
     e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  if (tag2 === "input" && e.getAttribute("inputmode") === "numeric" && e.getAttribute("maxlength") === "4") {
+    e.addEventListener("input", () => {
+      e.value = e.value.replace(/[^0-9]/g, "").slice(0, 4);
+    });
   }
   return e;
 }
@@ -20118,7 +20144,7 @@ function renderLocked() {
     h("div", { class: "vs-field" }, pw),
     btn,
     h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:10px", text: "Forgot PIN? Recover", onclick: renderRecover }),
-    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:32px;color:var(--vs-danger);border:1px solid var(--vs-danger);opacity:0.8", text: "Reset vault & start fresh", onclick: handleStartFresh })
+    h("button", { class: "vs-btn vs-btn-ghost vs-btn-block", style: "margin-top:32px;color:white;border:1px solid var(--vs-danger);background:var(--vs-danger)", text: "Reset vault & start fresh", onclick: handleStartFresh })
   ));
 }
 async function handleStartFresh() {
@@ -20693,20 +20719,44 @@ function renderChangeMasterPassword() {
   ));
   requestAnimationFrame(() => currentPw.focus());
 }
-async function renderSettings() {
-  view.name = "settings";
-  if (await sync.getActiveProfile()) {
-    try {
-      const remote = await sync.pullSettings();
-      if (remote) {
-        settings = { ...settings, ...remote };
-        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        applyTheme(settings.theme);
-      }
-    } catch (e) {
-      console.error("Failed to pull and merge remote settings:", e);
+async function populateHealthWidget(healthWidget) {
+  const profile = await sync.getActiveProfile();
+  if (!profile?.appsScriptUrl) {
+    const dot2 = healthWidget.querySelector(".okey-health-dot");
+    const text2 = healthWidget.querySelector(".okey-health-status-text");
+    const details2 = healthWidget.querySelector(".okey-health-details");
+    if (dot2 && text2 && details2) {
+      dot2.style.background = "#9ca3af";
+      text2.textContent = "Offline (No vault connected)";
+      details2.style.display = "none";
+    }
+    return;
+  }
+  const cached = await store.get("okey_backend_health");
+  const res = cached["okey_backend_health"];
+  const dot = healthWidget.querySelector(".okey-health-dot");
+  const text = healthWidget.querySelector(".okey-health-status-text");
+  const details = healthWidget.querySelector(".okey-health-details");
+  if (dot && text && details) {
+    if (res && res.status === "ok") {
+      dot.style.background = "var(--vs-success)";
+      text.textContent = "Active (Connected)";
+      details.style.display = "block";
+      clear(details);
+      details.append(
+        h("div", {}, `Apps Script: v${res.version || "1.0.0"}`),
+        h("div", {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
+        h("div", { style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || "N/A"}`)
+      );
+    } else {
+      dot.style.background = "#9ca3af";
+      text.textContent = "Connection status cached at sync/launch";
+      details.style.display = "none";
     }
   }
+}
+function renderSettings() {
+  view.name = "settings";
   clear(app);
   const themeSel = h("select", { class: "vs-select" }, ...["system", "dark", "light"].map((t) => h("option", { value: t, selected: settings.theme === t }, t)));
   themeSel.addEventListener("change", () => {
@@ -20714,7 +20764,10 @@ async function renderSettings() {
     applyTheme(themeSel.value);
   });
   const clientId = h("input", { class: "vs-input", value: getGoogleClientId(), placeholder: "Google OAuth Client ID" });
-  const sheetUrl = h("input", { class: "vs-input", value: (await sync.getActiveProfile())?.appsScriptUrl || "", placeholder: "Apps Script /exec URL" });
+  const sheetUrl = h("input", { class: "vs-input", placeholder: "Apps Script /exec URL" });
+  sync.getActiveProfile().then((profile) => {
+    if (profile?.appsScriptUrl) sheetUrl.value = profile.appsScriptUrl;
+  }).catch(console.error);
   const healthWidget = h(
     "div",
     { class: "okey-health-widget vs-glass", style: "padding: 8px 12px; margin-top: 8px; border-radius: 8px; font-size: 11px; border: 1px solid var(--vs-border);" },
@@ -20726,55 +20779,23 @@ async function renderSettings() {
     ),
     h("div", { class: "okey-health-details vs-faint", style: "margin-top: 6px; display:none; line-height: 1.4;" })
   );
-  clearTimeout(healthTimer);
-  const pollHealth = async () => {
-    if (view.name !== "settings") {
-      clearTimeout(healthTimer);
-      return;
-    }
-    const profile = await sync.getActiveProfile();
-    if (!profile?.appsScriptUrl) {
-      const dot = healthWidget.querySelector(".okey-health-dot");
-      const text = healthWidget.querySelector(".okey-health-status-text");
-      const details = healthWidget.querySelector(".okey-health-details");
-      if (dot && text && details) {
-        dot.style.background = "#9ca3af";
-        text.textContent = "Offline (No vault connected)";
-        details.style.display = "none";
-      }
-      return;
-    }
-    try {
-      const res = await sync._call("health");
-      if (res && res.status === "ok") {
-        const dot = healthWidget.querySelector(".okey-health-dot");
-        const text = healthWidget.querySelector(".okey-health-status-text");
-        const details = healthWidget.querySelector(".okey-health-details");
-        if (dot && text && details) {
-          dot.style.background = "var(--vs-success)";
-          text.textContent = "Active (Connected)";
-          details.style.display = "block";
-          clear(details);
-          details.append(
-            h("div", {}, `Apps Script: v${res.version || "1.0.0"}`),
-            h("div", {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
-            h("div", { style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || "N/A"}`)
-          );
-        }
-      }
-    } catch (e) {
-      const dot = healthWidget.querySelector(".okey-health-dot");
-      const text = healthWidget.querySelector(".okey-health-status-text");
-      const details = healthWidget.querySelector(".okey-health-details");
-      if (dot && text && details) {
-        dot.style.background = "var(--vs-error)";
-        text.textContent = `Offline (${e.message || "Connection failed"})`;
-        details.style.display = "none";
-      }
-    }
-    healthTimer = setTimeout(pollHealth, 2e4);
-  };
-  pollHealth();
+  const miniAutoLockOptions = [
+    { text: "1m", value: 60 },
+    { text: "5m", value: 300 },
+    { text: "10m", value: 600 },
+    { text: "30m", value: 1800 },
+    { text: "1h", value: 3600 },
+    { text: "2h", value: 7200 },
+    { text: "6h", value: 21600 }
+  ];
+  const miniLockVal = settings.miniAutoLockTimeout || 300;
+  const miniLockSel = h(
+    "select",
+    { class: "vs-select", style: "width:90px" },
+    ...miniAutoLockOptions.map((opt) => h("option", { value: opt.value, selected: Number(miniLockVal) === opt.value }, opt.text))
+  );
+  miniLockSel.addEventListener("change", () => saveSettings({ miniAutoLockTimeout: Number(miniLockSel.value) }));
+  const miniLock = h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Mini-view auto-lock" }), miniLockSel);
   app.append(h(
     "div",
     { class: "okey-view" },
@@ -20782,9 +20803,20 @@ async function renderSettings() {
     group(
       "Security",
       numberSetting("Auto-lock (seconds)", settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => saveSettings({ autoLockTimeout: v })),
+      miniLock,
       numberSetting("Clipboard clear (seconds)", settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => saveSettings({ clipboardClearTimeout: v })),
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Change master PIN" }), h("button", { class: "vs-btn vs-btn-secondary vs-btn-sm", text: "Change", onclick: renderChangeMasterPassword })),
       h("div", { class: "okey-setting" }, h("div", { class: "okey-setting-main", text: "Theme" }), themeSel)
+    ),
+    group(
+      "Autofill Preferences",
+      toggleRow("Auto-fill on single match", settings.autoFillSingleMatch, (v) => saveSettings({ autoFillSingleMatch: v })),
+      toggleRow("Auto-submit after fill", settings.autoSubmitEnabled, (v) => saveSettings({ autoSubmitEnabled: v })),
+      h(
+        "div",
+        { class: "vs-faint", style: "margin-top: 8px; font-size: 11px; line-height: 1.4;" },
+        `Tip: To prevent browser autofill popups from overlapping with OKey, disable the browser's built-in "Offer to save passwords" and "Autofill" settings.`
+      )
     ),
     group(
       "Sync (optional)",
@@ -20840,6 +20872,7 @@ async function renderSettings() {
       h("div", { class: "vs-faint", style: "text-align:center;margin-top:12px", text: "OKey 1.0.0 \xB7 zero-knowledge \xB7 Argon2id" })
     )
   ));
+  populateHealthWidget(healthWidget).catch(console.error);
 }
 async function importFile(ev) {
   const f = ev.target.files[0];
@@ -20881,6 +20914,24 @@ async function doSync() {
       await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     }
     const r = await sync.sync(vault);
+    try {
+      const remote = await sync.pullSettings();
+      if (remote) {
+        settings = { ...settings, ...remote };
+        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        if (typeof applyTheme === "function") applyTheme(settings.theme);
+      }
+    } catch (e) {
+      console.error("Failed to pull settings after sync:", e);
+    }
+    try {
+      const health = await sync._call("health");
+      if (health) {
+        await store.set({ "okey_backend_health": health });
+      }
+    } catch (e) {
+      console.error("Failed to get health after sync:", e);
+    }
     await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {
     });

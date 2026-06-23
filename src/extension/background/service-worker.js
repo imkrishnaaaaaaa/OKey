@@ -19,7 +19,7 @@ import { SyncEngine } from '../../core/sync.js';
 import { matchDomain, extractDomain } from '../../core/domain-matcher.js';
 import { ChromeStorageAdapter, chromeNetwork } from '../lib/platform.js';
 import { migrateLegacyStorage } from '../lib/migration.js';
-import { getCachedDek, clearSession, isPopupOpen, hardenSession, touchSession } from '../lib/session.js';
+import { getCachedDek, clearSession, isPopupOpen, hardenSession, touchSession, checkAndClearSessionIfExpired, cacheDek } from '../lib/session.js';
 
 const local = new ChromeStorageAdapter('local');
 
@@ -61,7 +61,7 @@ function onMessage(message, sender, sendResponse) {
   return true; // async
 }
 
-async function route(message) {
+async function route(message, sender) {
   switch (message.type) {
     case MSG.GET_SETTINGS:
       return { success: true, settings: await getSettings() };
@@ -86,6 +86,16 @@ async function route(message) {
     case MSG.RESCHEDULE_SYNC:
       await scheduleSyncAlarm();
       return { success: true };
+    case MSG.ADD_CREDENTIAL:
+      return addCredential(message.data);
+    case MSG.UNLOCK_VAULT:
+      return unlockVault(message.pin);
+    case MSG.SET_ACTIVE_FILLING_SESSION:
+      return setActiveFillingSession(message.cred, sender);
+    case MSG.GET_ACTIVE_FILLING_SESSION:
+      return getActiveFillingSession(sender);
+    case MSG.CLEAR_ACTIVE_FILLING_SESSION:
+      return clearActiveFillingSession(sender);
     default:
       return { success: false, error: `Unknown message: ${message.type}` };
   }
@@ -101,6 +111,19 @@ async function updateSettings(patch) {
   const merged = { ...(await getSettings()), ...patch };
   await local.set({ [STORAGE_KEYS.SETTINGS]: merged });
   if (patch.syncIntervalMinutes) await scheduleSyncAlarm();
+
+  // Broadcast settings update to content scripts in tabs
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, { type: MSG.UPDATE_SETTINGS, settings: merged }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to broadcast settings to tabs:", err);
+  }
+
   return { success: true, settings: merged };
 }
 
@@ -128,8 +151,9 @@ async function getCurrentSite() {
  * can still pick something when nothing matches the site.
  */
 async function getSiteCredentials(url) {
-  const vault = await openTransientVault();
-  if (!vault) return { success: true, locked: true, matches: [], others: [] };
+  const vault = await openTransientVault('mini');
+  const settings = await getSettings();
+  if (!vault) return { success: true, locked: true, matches: [], others: [], settings };
   const all = vault.getEntries({ type: 'password' });
   const ranked = matchDomain(url, all);
   const rankedIds = new Set(ranked.map((m) => m.id));
@@ -140,17 +164,35 @@ async function getSiteCredentials(url) {
     username: e.username,
     password: e.password,
     hasTotp: !!e.totpSecret,
+    totpSecret: e.totpSecret,
   });
   const matches = ranked.map((m) => toCred(all.find((e) => e.id === m.id))).filter(Boolean);
   const others = all.filter((e) => !rankedIds.has(e.id)).slice(0, 8).map(toCred);
   vault.lock();
-  return { success: true, locked: false, matches, others };
+  return { success: true, locked: false, matches, others, settings };
+}
+
+async function addCredential(data) {
+  const vault = await openTransientVault('mini');
+  if (!vault) {
+    throw new Error('OKey vault is locked');
+  }
+  try {
+    const entry = await vault.addEntry(data);
+    vault.lock();
+    // Sync updates to Google Sheets in the background
+    backgroundSync().catch(console.error);
+    return { success: true, entry };
+  } catch (err) {
+    vault.lock();
+    return { success: false, error: err.message };
+  }
 }
 
 // ---- Background sync (only when popup closed, vault unlocked) ----
 async function backgroundSync() {
   if (await isPopupOpen()) return { success: false, skipped: 'popup-open' };
-  const vault = await openTransientVault();
+  const vault = await openTransientVault('extension');
   if (!vault) return { success: false, skipped: 'locked' };
   try {
     const engine = new SyncEngine(local, chromeNetwork);
@@ -166,9 +208,8 @@ async function backgroundSync() {
 }
 
 /** Build a transient Vault from the session DEK, or null if locked. */
-async function openTransientVault() {
-  const settings = await getSettings();
-  const dek = await getCachedDek(settings.autoLockTimeout);
+async function openTransientVault(type = 'extension') {
+  const dek = await getCachedDek(type);
   if (!dek) return null;
   const vault = new Vault(local);
   try {
@@ -181,12 +222,29 @@ async function openTransientVault() {
   }
 }
 
+async function unlockVault(pin) {
+  const settings = await getSettings();
+  const vault = new Vault(local);
+  try {
+    await vault.unlock(pin);
+    const dek = vault.exportDek();
+    await cacheDek(dek, settings.autoLockTimeout);
+    dek.fill(0);
+    vault.lock();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // ---- Alarms ----
 async function onAlarm(alarm) {
   switch (alarm.name) {
     case SYNC.AUTO_LOCK_ALARM:
-      await clearSession();
-      broadcast(MSG.VAULT_LOCKED);
+      const cleared = await checkAndClearSessionIfExpired();
+      if (cleared) {
+        broadcast(MSG.VAULT_LOCKED);
+      }
       break;
     case SYNC.CLIPBOARD_ALARM:
       await clearClipboard();
@@ -229,3 +287,41 @@ function clampInterval(m) {
 function clampClip(s) {
   return Math.min(Math.max(Number(s) || SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS), SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS);
 }
+
+// ---- Active Filling Session Storage ----
+async function setActiveFillingSession(cred, sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: 'No tab ID found' };
+  const key = `okey_fill_session_${tabId}`;
+  await local.set({ [key]: { cred, timestamp: Date.now() } });
+  return { success: true };
+}
+
+async function getActiveFillingSession(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: 'No tab ID found' };
+  const key = `okey_fill_session_${tabId}`;
+  const s = await local.get(key);
+  const data = s[key];
+  if (data && (Date.now() - data.timestamp < 60000)) {
+    return { success: true, session: data };
+  }
+  if (data) {
+    await local.remove(key);
+  }
+  return { success: true, session: null };
+}
+
+async function clearActiveFillingSession(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: 'No tab ID found' };
+  const key = `okey_fill_session_${tabId}`;
+  await local.remove(key);
+  return { success: true };
+}
+
+// Cleanup active filling sessions when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const key = `okey_fill_session_${tabId}`;
+  local.remove(key).catch(() => {});
+});

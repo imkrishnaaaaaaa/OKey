@@ -109,6 +109,7 @@ export const FAVICON = Object.freeze({
 /** User settings synced via the Sheet (non-sensitive). */
 export const DEFAULT_SETTINGS = Object.freeze({
   autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
+  miniAutoLockTimeout: 300,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -117,6 +118,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   showRecents: true,
   recentsMaxCount: 10,
   faviconsEnabled: true,
+  autoSubmitEnabled: false,
+  autoFillSingleMatch: false,
   theme: 'system',
   passwordGeneratorDefaults: {
     length: PASSWORD_GEN.DEFAULT_LENGTH,

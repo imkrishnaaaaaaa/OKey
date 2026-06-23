@@ -568,24 +568,25 @@ body {
   width: 38px;
   height: 38px;
   border-radius: var(--vs-radius-pill);
-  background: var(--vs-bg-elev-3);
-  border: 1px solid var(--vs-border);
-  color: var(--vs-text-muted);
+  background: var(--vs-brand);
+  border: 1px solid var(--vs-brand-strong);
+  color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--vs-shadow-lg);
+  box-shadow: 0 4px 14px var(--vs-brand-glow);
   cursor: pointer;
   z-index: 99;
-  transition: transform var(--vs-dur) var(--vs-ease), background var(--vs-dur), color var(--vs-dur);
+  transition: transform var(--vs-dur) var(--vs-ease), background var(--vs-dur), color var(--vs-dur), box-shadow var(--vs-dur);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
 
 .okey-lock-fab:hover {
-  background: var(--vs-bg-elev-4);
-  color: var(--vs-danger);
+  background: var(--vs-brand-strong);
+  color: #ffffff;
   transform: scale(1.08);
+  box-shadow: 0 6px 20px var(--vs-brand-glow);
 }
 
 .okey-lock-fab:active {

@@ -3,6 +3,7 @@ var MSG = Object.freeze({
   // Vault lifecycle (status is derived from session presence)
   VAULT_LOCKED: "VAULT_LOCKED",
   LOCK_VAULT: "LOCK_VAULT",
+  UNLOCK_VAULT: "UNLOCK_VAULT",
   // Settings
   GET_SETTINGS: "GET_SETTINGS",
   UPDATE_SETTINGS: "UPDATE_SETTINGS",
@@ -18,7 +19,12 @@ var MSG = Object.freeze({
   GET_SITE_CREDENTIALS: "GET_SITE_CREDENTIALS",
   FILL_CREDENTIAL: "FILL_CREDENTIAL",
   OPEN_POPUP: "OPEN_POPUP",
-  TOUCH_SESSION: "TOUCH_SESSION"
+  TOUCH_SESSION: "TOUCH_SESSION",
+  ADD_CREDENTIAL: "ADD_CREDENTIAL",
+  // Autofill session tracking
+  SET_ACTIVE_FILLING_SESSION: "SET_ACTIVE_FILLING_SESSION",
+  GET_ACTIVE_FILLING_SESSION: "GET_ACTIVE_FILLING_SESSION",
+  CLEAR_ACTIVE_FILLING_SESSION: "CLEAR_ACTIVE_FILLING_SESSION"
 });
 
 // src/core/constants.js
@@ -115,6 +121,7 @@ var FAVICON = Object.freeze({
 });
 var DEFAULT_SETTINGS = Object.freeze({
   autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
+  miniAutoLockTimeout: 300,
   sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
   clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
   biometricEnabled: false,
@@ -123,6 +130,8 @@ var DEFAULT_SETTINGS = Object.freeze({
   showRecents: true,
   recentsMaxCount: 10,
   faviconsEnabled: true,
+  autoSubmitEnabled: false,
+  autoFillSingleMatch: false,
   theme: "system",
   passwordGeneratorDefaults: {
     length: PASSWORD_GEN.DEFAULT_LENGTH,
@@ -4441,6 +4450,9 @@ function assertStrongPassword(pw) {
   if (typeof pw !== "string" || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
     throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
+  if (!/^\d+$/.test(pw)) {
+    throw new ValidationError("Master PIN must contain only digits");
+  }
 }
 
 // src/core/sync.js
@@ -4923,6 +4935,7 @@ async function migrateLegacyStorage() {
 var K = {
   DEK: "okey_session_dek",
   EXPIRY: "okey_session_expiry",
+  MINI_EXPIRY: "okey_session_mini_expiry",
   VIEW: "okey_session_view",
   POPUP_OPEN: "okey_popup_open"
 };
@@ -4932,32 +4945,117 @@ async function hardenSession() {
   } catch {
   }
 }
-async function touchSession(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
-  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
+async function cacheDek(dekBytes, autoLockSeconds) {
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings = sStore["okey_settings"] || {};
+  const extSeconds = clamp(settings.autoLockTimeout || autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
+  const miniSeconds = Number(settings.miniAutoLockTimeout) || 300;
+  const now = Date.now();
+  await chrome.storage.session.set({
+    [K.DEK]: bytesToBase64(dekBytes),
+    [K.EXPIRY]: now + extSeconds * 1e3,
+    [K.MINI_EXPIRY]: now + miniSeconds * 1e3
+  });
+  const delaySeconds = Math.min(extSeconds, miniSeconds);
+  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delaySeconds / 60 });
+}
+async function touchSession(type = "extension") {
+  let viewType = type;
+  if (typeof type === "number") {
+    viewType = "extension";
+  }
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings = sStore["okey_settings"] || {};
+  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   if (!s[K.DEK]) return false;
-  if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
+  const now = Date.now();
+  const exp = s[K.EXPIRY] || 0;
+  const miniExp = s[K.MINI_EXPIRY] || 0;
+  if (now >= exp && now >= miniExp) {
     await clearSession();
     return false;
   }
+  const autoLockSeconds = viewType === "mini" ? settings.miniAutoLockTimeout || 300 : settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS;
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
+  const newExpiry = now + seconds * 1e3;
+  const update = {};
+  if (viewType === "mini") {
+    update[K.MINI_EXPIRY] = newExpiry;
+  } else {
+    update[K.EXPIRY] = newExpiry;
+  }
+  await chrome.storage.session.set(update);
+  const finalExp = viewType === "mini" ? exp : newExpiry;
+  const finalMiniExp = viewType === "mini" ? newExpiry : miniExp;
+  const nextTarget = [];
+  if (finalExp > now) nextTarget.push(finalExp);
+  if (finalMiniExp > now) nextTarget.push(finalMiniExp);
+  if (nextTarget.length > 0) {
+    const earliest = Math.min(...nextTarget);
+    const delayMinutes = Math.max(0.1, (earliest - now) / 6e4);
+    await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delayMinutes });
+  }
   return true;
 }
-async function getCachedDek(autoLockSeconds = SECURITY.DEFAULT_AUTO_LOCK_SECONDS) {
-  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY]);
+async function getCachedDek(type = "extension") {
+  let viewType = type;
+  if (typeof type === "number") {
+    viewType = "extension";
+  }
+  const sStore = await chrome.storage.local.get("okey_settings");
+  const settings = sStore["okey_settings"] || {};
+  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   if (!s[K.DEK]) return null;
-  if (s[K.EXPIRY] && Date.now() >= s[K.EXPIRY]) {
-    await clearSession();
+  const now = Date.now();
+  const expiryKey = viewType === "mini" ? K.MINI_EXPIRY : K.EXPIRY;
+  const exp = s[expiryKey] || 0;
+  if (exp && now >= exp) {
+    const otherExpiryKey = viewType === "mini" ? K.EXPIRY : K.MINI_EXPIRY;
+    const otherExp = s[otherExpiryKey] || 0;
+    if (now >= otherExp) {
+      await clearSession();
+    }
     return null;
   }
+  const autoLockSeconds = viewType === "mini" ? settings.miniAutoLockTimeout || 300 : settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS;
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  await chrome.storage.session.set({ [K.EXPIRY]: Date.now() + seconds * 1e3 });
-  await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: seconds / 60 });
+  const newExpiry = now + seconds * 1e3;
+  const update = { [expiryKey]: newExpiry };
+  await chrome.storage.session.set(update);
+  const finalExp = viewType === "mini" ? s[K.EXPIRY] || 0 : newExpiry;
+  const finalMiniExp = viewType === "mini" ? newExpiry : s[K.MINI_EXPIRY] || 0;
+  const nextTarget = [];
+  if (finalExp > now) nextTarget.push(finalExp);
+  if (finalMiniExp > now) nextTarget.push(finalMiniExp);
+  if (nextTarget.length > 0) {
+    const earliest = Math.min(...nextTarget);
+    const delayMinutes = Math.max(0.1, (earliest - now) / 6e4);
+    await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delayMinutes });
+  }
   return base64ToBytes(s[K.DEK]);
 }
+async function checkAndClearSessionIfExpired() {
+  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
+  if (!s[K.DEK]) return true;
+  const now = Date.now();
+  const exp = s[K.EXPIRY] || 0;
+  const miniExp = s[K.MINI_EXPIRY] || 0;
+  if (now >= exp && now >= miniExp) {
+    await clearSession();
+    return true;
+  }
+  const nextTarget = [];
+  if (exp > now) nextTarget.push(exp);
+  if (miniExp > now) nextTarget.push(miniExp);
+  if (nextTarget.length > 0) {
+    const earliest = Math.min(...nextTarget);
+    const delayMinutes = Math.max(0.1, (earliest - now) / 6e4);
+    await chrome.alarms.create(SYNC.AUTO_LOCK_ALARM, { delayInMinutes: delayMinutes });
+  }
+  return false;
+}
 async function clearSession() {
-  await chrome.storage.session.remove([K.DEK, K.EXPIRY]);
+  await chrome.storage.session.remove([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
   await chrome.alarms.clear(SYNC.AUTO_LOCK_ALARM);
 }
 async function isPopupOpen() {
@@ -5001,7 +5099,7 @@ function onMessage(message, sender, sendResponse) {
   })();
   return true;
 }
-async function route(message) {
+async function route(message, sender) {
   switch (message.type) {
     case MSG.GET_SETTINGS:
       return { success: true, settings: await getSettings() };
@@ -5026,6 +5124,16 @@ async function route(message) {
     case MSG.RESCHEDULE_SYNC:
       await scheduleSyncAlarm();
       return { success: true };
+    case MSG.ADD_CREDENTIAL:
+      return addCredential(message.data);
+    case MSG.UNLOCK_VAULT:
+      return unlockVault(message.pin);
+    case MSG.SET_ACTIVE_FILLING_SESSION:
+      return setActiveFillingSession(message.cred, sender);
+    case MSG.GET_ACTIVE_FILLING_SESSION:
+      return getActiveFillingSession(sender);
+    case MSG.CLEAR_ACTIVE_FILLING_SESSION:
+      return clearActiveFillingSession(sender);
     default:
       return { success: false, error: `Unknown message: ${message.type}` };
   }
@@ -5038,6 +5146,17 @@ async function updateSettings(patch) {
   const merged = { ...await getSettings(), ...patch };
   await local.set({ [STORAGE_KEYS.SETTINGS]: merged });
   if (patch.syncIntervalMinutes) await scheduleSyncAlarm();
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, { type: MSG.UPDATE_SETTINGS, settings: merged }).catch(() => {
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to broadcast settings to tabs:", err);
+  }
   return { success: true, settings: merged };
 }
 async function scheduleClipboardClear() {
@@ -5055,8 +5174,9 @@ async function getCurrentSite() {
   }
 }
 async function getSiteCredentials(url) {
-  const vault = await openTransientVault();
-  if (!vault) return { success: true, locked: true, matches: [], others: [] };
+  const vault = await openTransientVault("mini");
+  const settings = await getSettings();
+  if (!vault) return { success: true, locked: true, matches: [], others: [], settings };
   const all = vault.getEntries({ type: "password" });
   const ranked = matchDomain(url, all);
   const rankedIds = new Set(ranked.map((m) => m.id));
@@ -5066,16 +5186,32 @@ async function getSiteCredentials(url) {
     domain: e.domain,
     username: e.username,
     password: e.password,
-    hasTotp: !!e.totpSecret
+    hasTotp: !!e.totpSecret,
+    totpSecret: e.totpSecret
   });
   const matches = ranked.map((m) => toCred(all.find((e) => e.id === m.id))).filter(Boolean);
   const others = all.filter((e) => !rankedIds.has(e.id)).slice(0, 8).map(toCred);
   vault.lock();
-  return { success: true, locked: false, matches, others };
+  return { success: true, locked: false, matches, others, settings };
+}
+async function addCredential(data) {
+  const vault = await openTransientVault("mini");
+  if (!vault) {
+    throw new Error("OKey vault is locked");
+  }
+  try {
+    const entry = await vault.addEntry(data);
+    vault.lock();
+    backgroundSync().catch(console.error);
+    return { success: true, entry };
+  } catch (err) {
+    vault.lock();
+    return { success: false, error: err.message };
+  }
 }
 async function backgroundSync() {
   if (await isPopupOpen()) return { success: false, skipped: "popup-open" };
-  const vault = await openTransientVault();
+  const vault = await openTransientVault("extension");
   if (!vault) return { success: false, skipped: "locked" };
   try {
     const engine = new SyncEngine(local, chromeNetwork);
@@ -5089,9 +5225,8 @@ async function backgroundSync() {
     vault.lock();
   }
 }
-async function openTransientVault() {
-  const settings = await getSettings();
-  const dek = await getCachedDek(settings.autoLockTimeout);
+async function openTransientVault(type = "extension") {
+  const dek = await getCachedDek(type);
   if (!dek) return null;
   const vault = new Vault(local);
   try {
@@ -5103,11 +5238,27 @@ async function openTransientVault() {
     dek.fill(0);
   }
 }
+async function unlockVault(pin) {
+  const settings = await getSettings();
+  const vault = new Vault(local);
+  try {
+    await vault.unlock(pin);
+    const dek = vault.exportDek();
+    await cacheDek(dek, settings.autoLockTimeout);
+    dek.fill(0);
+    vault.lock();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
 async function onAlarm(alarm) {
   switch (alarm.name) {
     case SYNC.AUTO_LOCK_ALARM:
-      await clearSession();
-      broadcast(MSG.VAULT_LOCKED);
+      const cleared = await checkAndClearSessionIfExpired();
+      if (cleared) {
+        broadcast(MSG.VAULT_LOCKED);
+      }
       break;
     case SYNC.CLIPBOARD_ALARM:
       await clearClipboard();
@@ -5146,4 +5297,37 @@ function clampInterval(m) {
 function clampClip(s) {
   return Math.min(Math.max(Number(s) || SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS), SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS);
 }
+async function setActiveFillingSession(cred, sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: "No tab ID found" };
+  const key = `okey_fill_session_${tabId}`;
+  await local.set({ [key]: { cred, timestamp: Date.now() } });
+  return { success: true };
+}
+async function getActiveFillingSession(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: "No tab ID found" };
+  const key = `okey_fill_session_${tabId}`;
+  const s = await local.get(key);
+  const data = s[key];
+  if (data && Date.now() - data.timestamp < 6e4) {
+    return { success: true, session: data };
+  }
+  if (data) {
+    await local.remove(key);
+  }
+  return { success: true, session: null };
+}
+async function clearActiveFillingSession(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { success: false, error: "No tab ID found" };
+  const key = `okey_fill_session_${tabId}`;
+  await local.remove(key);
+  return { success: true };
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const key = `okey_fill_session_${tabId}`;
+  local.remove(key).catch(() => {
+  });
+});
 //# sourceMappingURL=service-worker.js.map

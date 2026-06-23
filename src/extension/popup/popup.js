@@ -60,10 +60,12 @@ async function loadStartupData() {
       renderMain();
     }
 
-    const [ver, cfg, dash] = await Promise.all([
+    const [ver, cfg, dash, remoteSettings, health] = await Promise.all([
       sync.checkVersion().catch((err) => { console.error("Version check error:", err); return null; }),
       sync._call('config').catch((err) => { console.error("Config check error:", err); return null; }),
-      sync.fetchDashboard().catch((err) => { console.error("Dashboard fetch error:", err); return null; })
+      sync.fetchDashboard().catch((err) => { console.error("Dashboard fetch error:", err); return null; }),
+      sync.pullSettings().catch((err) => { console.error("Settings pull error:", err); return null; }),
+      sync._call('health').catch((err) => { console.error("Health check error:", err); return null; })
     ]);
 
     if (ver) {
@@ -77,6 +79,15 @@ async function loadStartupData() {
     if (dash) {
       dashboardData = dash;
       await local.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+    }
+    if (remoteSettings) {
+      settings = { ...settings, ...remoteSettings };
+      await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+      await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+      if (typeof applyTheme === 'function') applyTheme(settings.theme);
+    }
+    if (health) {
+      await local.set({ 'okey_backend_health': health });
     }
 
     if (view.name === 'main') {
@@ -102,23 +113,6 @@ async function refreshDashboardAfterSync() {
   }
 }
 
-function renderHomeDashboard() {
-  if (!dashboardData) return null;
-  const lastSyncText = dashboardData.lastSync ? formatTimeAgo(dashboardData.lastSync) : 'Never';
-  return h('div', { class: 'okey-home-dashboard vs-glass', style: 'padding:12px; margin: 0 12px 12px 12px; border-radius:12px; font-size:12px; border:1px solid var(--vs-border);' },
-    h('div', { style: 'display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:center; font-weight:bold; margin-bottom: 8px;' },
-      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-brand);' }, dashboardData.activeEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Active')),
-      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-success);' }, dashboardData.pinnedEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Pinned')),
-      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-warning);' }, dashboardData.folders ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Folders')),
-      h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-text-muted);' }, dashboardData.deletedEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Deleted'))
-    ),
-    h('div', { style: 'display:flex; justify-content:space-between; font-size:10px; border-top: 1px solid var(--vs-border); padding-top:6px;' },
-      h('span', { class: 'vs-faint' }, `Total Items: ${dashboardData.totalEntries ?? 0}`),
-      h('span', { class: 'vs-faint' }, `Synced: ${lastSyncText}`)
-    )
-  );
-}
-
 function updateSyncUI(status) {
   syncStatus = status;
   const dot = document.querySelector('.okey-sync-dot');
@@ -141,6 +135,11 @@ function h(tag, props = {}, ...kids) {
   for (const kid of kids.flat()) {
     if (kid == null || kid === false) continue;
     e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  if (tag === 'input' && e.getAttribute('inputmode') === 'numeric' && e.getAttribute('maxlength') === '4') {
+    e.addEventListener('input', () => {
+      e.value = e.value.replace(/[^0-9]/g, '').slice(0, 4);
+    });
   }
   return e;
 }
@@ -282,7 +281,7 @@ async function boot() {
   currentSite = (await chrome.runtime.sendMessage({ type: MSG.GET_CURRENT_SITE }).catch(() => ({}))) || {};
 
   chrome.runtime.onMessage.addListener((m) => {
-    if (m.type === MSG.VAULT_LOCKED) { vault.lock(); renderLocked({ overlay: true }); }
+    if (m.type === MSG.VAULT_LOCKED) { vault.lock(); renderLocked(); }
   });
 
   const state = await vault.getState();
@@ -510,11 +509,10 @@ function renderRecoveryReveal(mnemonic, done) {
 }
 
 // ============================ LOCKED ============================
-function renderLocked({ overlay = false } = {}) {
+function renderLocked() {
   clearInterval(totpTimer);
   document.getElementById('okey-lock-overlay')?.remove();
   hideFloatingLock();
-  const useOverlay = overlay && app.childElementCount > 0;
   const pw = h('input', { class: 'vs-input okey-lock-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Master PIN', autofocus: true });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Unlock' });
   const submit = async () => {
@@ -524,12 +522,7 @@ function renderLocked({ overlay = false } = {}) {
       await vault.unlock(pw.value);
       await cacheDek(vault.exportDek(), settings.autoLockTimeout);
       showFloatingLock();
-      const overlayEl = document.getElementById('okey-lock-overlay');
-      if (overlayEl) {
-        overlayEl.remove();
-      } else {
-        await restoreSavedView(await getViewState());
-      }
+      await restoreSavedView(await getViewState());
       maybeSyncOnUnlock();
       loadStartupData().catch((err) => console.error("loadStartupData error:", err));
     } catch (e) {
@@ -547,15 +540,15 @@ function renderLocked({ overlay = false } = {}) {
   pw.addEventListener('input', () => { if (pw.value.length === 4) submit(); });
   btn.addEventListener('click', submit);
 
-  const lockCard = h('div', { class: useOverlay ? 'okey-lock-card vs-glass' : 'okey-view okey-lock-full' },
+  const lockCard = h('div', { class: 'okey-view okey-lock-full' },
     brandHeader(),
     h('div', { class: 'vs-field' }, pw),
     btn,
     h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot PIN? Use recovery key', onclick: renderRecover }),
-    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:32px;color:var(--vs-danger);border:1px solid var(--vs-danger);opacity:0.8', text: 'Reset vault & start fresh', onclick: handleStartFresh }),
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:32px;color:white;border:1px solid var(--vs-danger);background:var(--vs-danger)', text: 'Reset vault & start fresh', onclick: handleStartFresh }),
   );
-  if (useOverlay) document.body.append(h('div', { class: 'okey-lock-overlay', id: 'okey-lock-overlay' }, lockCard));
-  else { clear(app); app.append(lockCard); }
+  clear(app);
+  app.append(lockCard);
   requestAnimationFrame(() => pw.focus());
 }
 
@@ -634,9 +627,8 @@ function renderMain() {
   const updateBanner = backendVersionMismatch
     ? h('div', { class: 'okey-warn', style: 'margin: 8px 12px; font-weight: 600;', text: 'WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code.' })
     : null;
-  const dashPanel = renderHomeDashboard();
 
-  app.append(...[header, updateBanner, dashPanel, tabs, body, footer].filter(Boolean));
+  app.append(...[header, updateBanner, tabs, body, footer].filter(Boolean));
   search.addEventListener('input', () => renderList(body, search.value));
   renderList(body, '');
 }
@@ -1051,38 +1043,78 @@ function renderGenerator(saved = null) {
 }
 
 // ============================ SETTINGS ============================
-async function renderSettings(scrollTop = 0) {
+async function populateHealthWidget(healthWidget) {
+  const profile = await sync.getActiveProfile();
+  if (!profile?.appsScriptUrl) {
+    const dot = healthWidget.querySelector('.okey-health-dot');
+    const text = healthWidget.querySelector('.okey-health-status-text');
+    const details = healthWidget.querySelector('.okey-health-details');
+    if (dot && text && details) {
+      dot.style.background = '#9ca3af';
+      text.textContent = 'Offline (No vault connected)';
+      details.style.display = 'none';
+    }
+    return;
+  }
+
+  const cached = await local.get('okey_backend_health');
+  const res = cached['okey_backend_health'];
+  const dot = healthWidget.querySelector('.okey-health-dot');
+  const text = healthWidget.querySelector('.okey-health-status-text');
+  const details = healthWidget.querySelector('.okey-health-details');
+  if (dot && text && details) {
+    if (res && res.status === 'ok') {
+      dot.style.background = 'var(--vs-success)';
+      text.textContent = 'Active (Connected)';
+      details.style.display = 'block';
+      clear(details);
+      details.append(
+        h('div', {}, `Apps Script: v${res.version || '1.0.0'}`),
+        h('div', {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
+        h('div', { style: 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || 'N/A'}`)
+      );
+    } else {
+      dot.style.background = '#9ca3af';
+      text.textContent = 'Connection status cached at sync/launch';
+      details.style.display = 'none';
+    }
+  }
+}
+
+function renderSettings(scrollTop = 0) {
   view.name = 'settings';
   view.entryId = null;
   rememberView({ scrollTop });
-  
-  if (await sync.getActiveProfile()) {
-    try {
-      const remote = await sync.pullSettings();
-      if (remote) {
-        settings = { ...settings, ...remote };
-        await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
-        applyTheme(settings.theme);
-      }
-    } catch (e) {
-      console.error("Failed to pull and merge remote settings:", e);
-    }
-  }
 
   clear(app);
-  const profiles = await sync.getProfiles();
-  const lastSync = (await local.get(STORAGE_KEYS.LAST_SYNC_AT))[STORAGE_KEYS.LAST_SYNC_AT];
 
   const themeSel = h('select', { class: 'vs-select' },
     ...['system', 'dark', 'light'].map((t) => h('option', { value: t, selected: settings.theme === t }, t)));
   themeSel.addEventListener('change', () => updateSettings({ theme: themeSel.value }).then(() => applyTheme(themeSel.value)));
 
   const autoLock = numberSetting('Auto-lock (seconds)', settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => updateSettings({ autoLockTimeout: v }));
+  const miniAutoLockOptions = [
+    { text: '1m', value: 60 },
+    { text: '5m', value: 300 },
+    { text: '10m', value: 600 },
+    { text: '30m', value: 1800 },
+    { text: '1h', value: 3600 },
+    { text: '2h', value: 7200 },
+    { text: '6h', value: 21600 }
+  ];
+  const miniLockVal = settings.miniAutoLockTimeout || 300;
+  const miniLockSel = h('select', { class: 'vs-select', style: 'width:90px' },
+    ...miniAutoLockOptions.map((opt) => h('option', { value: opt.value, selected: Number(miniLockVal) === opt.value }, opt.text))
+  );
+  miniLockSel.addEventListener('change', () => updateSettings({ miniAutoLockTimeout: Number(miniLockSel.value) }));
+  const miniLock = h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: 'Mini-view auto-lock' })), miniLockSel);
+
   const clip = numberSetting('Clipboard clear (seconds)', settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => updateSettings({ clipboardClearTimeout: v }));
 
   // Connected Sheets (#11, #12)
   const profileList = h('div', {});
+  const lastSyncLabel = h('div', { class: 'vs-faint', style: 'margin-top:6px', text: 'Loading...' });
+
   const renderProfiles = (list) => {
     clear(profileList);
     if (!list.length) profileList.append(h('div', { class: 'vs-faint', text: 'No vault connected. Add one to enable sync.' }));
@@ -1091,7 +1123,6 @@ async function renderSettings(scrollTop = 0) {
       h('div', { class: 'okey-profile-main' }, h('div', { text: p.label }), h('div', { class: 'okey-profile-url', text: p.appsScriptUrl })),
       iconBtn(ICONS.trash, 'Remove', async () => { await sync.removeProfile(p.id); renderProfiles(await sync.getProfiles()); }))));
   };
-  renderProfiles(profiles);
 
   // Health check status widget
   const healthWidget = h('div', { class: 'okey-health-widget vs-glass', style: 'padding: 8px 12px; margin-top: 8px; border-radius: 8px; font-size: 11px; border: 1px solid var(--vs-border);' },
@@ -1102,75 +1133,31 @@ async function renderSettings(scrollTop = 0) {
     h('div', { class: 'okey-health-details vs-faint', style: 'margin-top: 6px; display:none; line-height: 1.4;' })
   );
 
-  clearTimeout(healthTimer);
-  const pollHealth = async () => {
-    if (view.name !== 'settings') {
-      clearTimeout(healthTimer);
-      return;
-    }
-    const profile = await sync.getActiveProfile();
-    if (!profile?.appsScriptUrl) {
-      const dot = healthWidget.querySelector('.okey-health-dot');
-      const text = healthWidget.querySelector('.okey-health-status-text');
-      const details = healthWidget.querySelector('.okey-health-details');
-      if (dot && text && details) {
-        dot.style.background = '#9ca3af';
-        text.textContent = 'Offline (No vault connected)';
-        details.style.display = 'none';
-      }
-      return;
-    }
-
-    try {
-      const res = await sync._call('health');
-      if (res && res.status === 'ok') {
-        const dot = healthWidget.querySelector('.okey-health-dot');
-        const text = healthWidget.querySelector('.okey-health-status-text');
-        const details = healthWidget.querySelector('.okey-health-details');
-        if (dot && text && details) {
-          dot.style.background = 'var(--vs-success)';
-          text.textContent = 'Active (Connected)';
-          details.style.display = 'block';
-          clear(details);
-          details.append(
-            h('div', {}, `Apps Script: v${res.version || '1.0.0'}`),
-            h('div', {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
-            h('div', { style: 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || 'N/A'}`)
-          );
-        }
-      }
-    } catch (e) {
-      const dot = healthWidget.querySelector('.okey-health-dot');
-      const text = healthWidget.querySelector('.okey-health-status-text');
-      const details = healthWidget.querySelector('.okey-health-details');
-      if (dot && text && details) {
-        dot.style.background = 'var(--vs-error)';
-        text.textContent = `Offline (${e.message || 'Connection failed'})`;
-        details.style.display = 'none';
-      }
-    }
-    healthTimer = setTimeout(pollHealth, 20000);
-  };
-  pollHealth();
-
-  app.append(h('div', { class: 'okey-view' },
+  const viewContainer = h('div', { class: 'okey-view' },
     viewHeader('Settings', renderMain),
 
     settingsGroup('Security',
-      autoLock, clip,
+      autoLock, miniLock, clip,
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: 'Change master PIN' })), h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: 'Change', onclick: changeMasterPasswordModal })),
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main' }, h('div', { text: 'Theme' })), themeSel)),
+
+    settingsGroup('Autofill Preferences',
+      toggleRow('Auto-fill on single match', settings.autoFillSingleMatch, (v) => updateSettings({ autoFillSingleMatch: v })),
+      toggleRow('Auto-submit after fill', settings.autoSubmitEnabled, (v) => updateSettings({ autoSubmitEnabled: v })),
+      h('div', { class: 'vs-faint', style: 'margin-top: 8px; font-size: 11px; line-height: 1.4;' },
+        'Tip: To prevent browser autofill popups from overlapping with OKey, disable the browser\'s built-in "Offer to save passwords" and "Autofill" settings.'
+      )),
 
     settingsGroup('Connected Sheets',
       profileList,
       h('div', { class: 'vs-row', style: 'margin-top:8px' },
-        h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Add vault sheet', onclick: () => addSheetModal(async () => renderSettings()) }),
+        h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Add vault sheet', onclick: () => addSheetModal(() => renderSettings()) }),
         h('button', { class: 'vs-btn vs-btn-primary', text: 'Sync now', onclick: async (ev) => {
           const b = ev.currentTarget;
           b.disabled = true; b.textContent = 'Syncing...';
           try { await doManualSync(); } finally { b.disabled = false; b.textContent = 'Sync now'; }
         } })),
-      h('div', { class: 'vs-faint', style: 'margin-top:6px', text: lastSync ? `Last synced ${formatTimeAgo(lastSync)}` : 'Never synced' }),
+      lastSyncLabel,
       healthWidget),
 
     settingsGroup('Recovery',
@@ -1185,11 +1172,25 @@ async function renderSettings(scrollTop = 0) {
       h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', text: 'Open password generator', onclick: renderGenerator }),
       h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px', text: 'Lock now', onclick: async () => { await clearSession(); vault.lock(); renderLocked(); } }),
       h('div', { class: 'vs-faint', style: 'text-align:center;margin-top:14px', text: 'OKey 1.0.0 · zero-knowledge · Argon2id' })),
-  ));
+  );
+
+  app.append(viewContainer);
+  requestAnimationFrame(() => {
+    viewContainer.scrollTop = scrollTop || 0;
+  });
+
+  // Load dynamic data in background
+  sync.getProfiles().then(renderProfiles).catch(console.error);
+  local.get(STORAGE_KEYS.LAST_SYNC_AT).then((res) => {
+    const lastSync = res[STORAGE_KEYS.LAST_SYNC_AT];
+    lastSyncLabel.textContent = lastSync ? `Last synced ${formatTimeAgo(lastSync)}` : 'Never synced';
+  }).catch(console.error);
+
+  populateHealthWidget(healthWidget).catch(console.error);
 }
 
 function viewRecovery() {
-  const pw = h('input', { class: 'vs-input', type: 'password', placeholder: 'Confirm master PIN' });
+  const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Confirm master PIN', autofocus: true });
   modal('Recovery key', [
     h('p', { class: 'vs-muted', text: 'Regenerate your 24-word recovery key. The old key will stop working.' }),
     h('div', { class: 'vs-field' }, pw),
@@ -1357,6 +1358,29 @@ async function doManualSync() {
 
     await sync.pushSettings(settings).catch(() => {});
     const r = await sync.sync(vault);
+    
+    // Pull settings and health check after manual sync
+    try {
+      const remote = await sync.pullSettings();
+      if (remote) {
+        settings = { ...settings, ...remote };
+        await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+        if (typeof applyTheme === 'function') applyTheme(settings.theme);
+      }
+    } catch (e) {
+      console.error("Failed to pull settings after sync:", e);
+    }
+    
+    try {
+      const health = await sync._call('health');
+      if (health) {
+        await local.set({ 'okey_backend_health': health });
+      }
+    } catch (e) {
+      console.error("Failed to get health after sync:", e);
+    }
+
     // Sync Cache Invalidation
     await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {});
@@ -1393,6 +1417,22 @@ async function maybeSyncOnUnlock() {
         await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
         await sync.getFolders(true).catch(() => {});
         await refreshDashboardAfterSync().catch(() => {});
+
+        // Pull settings and health check asynchronously
+        sync.pullSettings().then(async (remote) => {
+          if (remote) {
+            settings = { ...settings, ...remote };
+            await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+            await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+            if (typeof applyTheme === 'function') applyTheme(settings.theme);
+          }
+        }).catch(() => {});
+
+        sync._call('health').then(async (health) => {
+          if (health) {
+            await local.set({ 'okey_backend_health': health });
+          }
+        }).catch(() => {});
       })
       .catch(() => updateSyncUI('err'));
   }

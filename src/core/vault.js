@@ -632,6 +632,9 @@ function assertStrongPassword(pw) {
   if (typeof pw !== 'string' || pw.length < SECURITY.MIN_MASTER_PASSWORD_LENGTH) {
     throw new ValidationError(`Master PIN must be at least ${SECURITY.MIN_MASTER_PASSWORD_LENGTH} digits`);
   }
+  if (!/^\d+$/.test(pw)) {
+    throw new ValidationError('Master PIN must contain only digits');
+  }
 }
 
 export { ENTRY_TYPES };

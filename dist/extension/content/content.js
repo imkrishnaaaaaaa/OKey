@@ -93,6 +93,7 @@
   });
   var DEFAULT_SETTINGS = Object.freeze({
     autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
+    miniAutoLockTimeout: 300,
     sessionReunlockCooldown: SECURITY.SESSION_REUNLOCK_COOLDOWN_MINUTES,
     clipboardClearTimeout: SECURITY.DEFAULT_CLIPBOARD_CLEAR_SECONDS,
     biometricEnabled: false,
@@ -101,6 +102,8 @@
     showRecents: true,
     recentsMaxCount: 10,
     faviconsEnabled: true,
+    autoSubmitEnabled: false,
+    autoFillSingleMatch: false,
     theme: "system",
     passwordGeneratorDefaults: {
       length: PASSWORD_GEN.DEFAULT_LENGTH,
@@ -170,6 +173,22 @@
     t["=".charCodeAt(0)] = -2;
     return t;
   })();
+
+  // src/core/errors.js
+  var OKeyError = class extends Error {
+    /** @param {string} message @param {string} code */
+    constructor(message, code = "OKEY_ERROR") {
+      super(message);
+      this.name = "OKeyError";
+      this.code = code;
+    }
+  };
+  var ValidationError = class extends OKeyError {
+    constructor(message = "Validation failed") {
+      super(message, "VALIDATION_ERROR");
+      this.name = "ValidationError";
+    }
+  };
 
   // src/core/crypto.js
   function randomBytes(n) {
@@ -2268,11 +2287,69 @@ zoo`.split("\n");
     return shuffle(chars).join("");
   }
 
+  // src/core/totp.js
+  var BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  function base32Decode(base32) {
+    const cleaned = String(base32 || "").replace(/[\s=]/g, "").toUpperCase();
+    let bits = 0;
+    let value = 0;
+    const out = [];
+    for (const ch of cleaned) {
+      const idx = BASE32_ALPHABET.indexOf(ch);
+      if (idx === -1) throw new ValidationError("Invalid Base32 character in TOTP secret");
+      value = value << 5 | idx;
+      bits += 5;
+      if (bits >= 8) {
+        bits -= 8;
+        out.push(value >>> bits & 255);
+      }
+    }
+    return new Uint8Array(out);
+  }
+  var HMAC_HASH = { "SHA-1": "SHA-1", SHA1: "SHA-1", "SHA-256": "SHA-256", SHA256: "SHA-256", "SHA-512": "SHA-512", SHA512: "SHA-512" };
+  async function hmac(keyBytes, msgBytes, algorithm) {
+    const hash = HMAC_HASH[algorithm] || "SHA-1";
+    const key = await globalThis.crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash }, false, ["sign"]);
+    return new Uint8Array(await globalThis.crypto.subtle.sign("HMAC", key, msgBytes));
+  }
+  function counterBytes(counter) {
+    const buf = new Uint8Array(8);
+    let n = counter;
+    for (let i = 7; i >= 0; i--) {
+      buf[i] = n & 255;
+      n = Math.floor(n / 256);
+    }
+    return buf;
+  }
+  async function hotp(keyBytes, counter, digits = TOTP.DEFAULT_DIGITS, algorithm = TOTP.DEFAULT_ALGORITHM) {
+    const hash = await hmac(keyBytes, counterBytes(counter), algorithm);
+    const offset = hash[hash.length - 1] & 15;
+    const bin = (hash[offset] & 127) << 24 | (hash[offset + 1] & 255) << 16 | (hash[offset + 2] & 255) << 8 | hash[offset + 3] & 255;
+    return (bin % 10 ** digits).toString().padStart(digits, "0");
+  }
+  async function generateTOTP(secret, opts = {}) {
+    const period = opts.period ?? TOTP.DEFAULT_PERIOD;
+    const digits = opts.digits ?? TOTP.DEFAULT_DIGITS;
+    const algorithm = opts.algorithm ?? TOTP.DEFAULT_ALGORITHM;
+    const ts = opts.timestamp ?? Date.now();
+    const seconds = Math.floor(ts / 1e3);
+    const counter = Math.floor(seconds / period);
+    const remaining = period - seconds % period;
+    const code = await hotp(base32Decode(secret), counter, digits, algorithm);
+    return { code, remaining, period };
+  }
+  function isValidTotpSecret(secret) {
+    if (!secret || typeof secret !== "string") return false;
+    const cleaned = secret.replace(/[\s=]/g, "").toUpperCase();
+    return /^[A-Z2-7]+$/.test(cleaned) && cleaned.length >= 16;
+  }
+
   // src/extension/lib/messages.js
   var MSG = Object.freeze({
     // Vault lifecycle (status is derived from session presence)
     VAULT_LOCKED: "VAULT_LOCKED",
     LOCK_VAULT: "LOCK_VAULT",
+    UNLOCK_VAULT: "UNLOCK_VAULT",
     // Settings
     GET_SETTINGS: "GET_SETTINGS",
     UPDATE_SETTINGS: "UPDATE_SETTINGS",
@@ -2288,7 +2365,12 @@ zoo`.split("\n");
     GET_SITE_CREDENTIALS: "GET_SITE_CREDENTIALS",
     FILL_CREDENTIAL: "FILL_CREDENTIAL",
     OPEN_POPUP: "OPEN_POPUP",
-    TOUCH_SESSION: "TOUCH_SESSION"
+    TOUCH_SESSION: "TOUCH_SESSION",
+    ADD_CREDENTIAL: "ADD_CREDENTIAL",
+    // Autofill session tracking
+    SET_ACTIVE_FILLING_SESSION: "SET_ACTIVE_FILLING_SESSION",
+    GET_ACTIVE_FILLING_SESSION: "GET_ACTIVE_FILLING_SESSION",
+    CLEAR_ACTIVE_FILLING_SESSION: "CLEAR_ACTIVE_FILLING_SESSION"
   });
 
   // src/extension/content/content.js
@@ -2296,6 +2378,9 @@ zoo`.split("\n");
   var PANEL = "okey-panel";
   var tracked = /* @__PURE__ */ new WeakSet();
   var panelEl = null;
+  var settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
+  var activeSessionCred = null;
+  var activeSessionTime = 0;
   var SVG_KEY = '<svg viewBox="0 0 24 24" fill="none" width="14" height="14"><rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#fff" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#fff" stroke-width="2"/></svg>';
   function isPasswordField(el) {
     return el.tagName === "INPUT" && el.type === "password";
@@ -2306,10 +2391,120 @@ zoo`.split("\n");
     const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder}`.toLowerCase();
     return /user|email|login|account|phone|mobile/.test(hay) || el.autocomplete === "username";
   }
+  function isTotpField(el) {
+    if (el.tagName !== "INPUT") return false;
+    if (!["text", "number", "tel"].includes(el.type)) return false;
+    const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder} ${el.className}`.toLowerCase();
+    return /totp|2fa|otp|auth|code|verification|factor|secure|pin/.test(hay) || el.autocomplete === "one-time-code";
+  }
+  function isButtonLike(el) {
+    if (el.tagName !== "INPUT") return false;
+    if (el.type === "password") return false;
+    if (["submit", "button", "image", "reset"].includes(el.type)) return true;
+    const val = (el.value || "").trim().toLowerCase();
+    if (!val) return false;
+    const buttonKeywords = ["login", "log in", "signin", "sign in", "submit", "continue", "next", "proceed", "go", "ok", "verify", "confirm"];
+    return buttonKeywords.includes(val) || /log\s*in|sign\s*in|submit|continue|next|proceed|verify|confirm/i.test(val);
+  }
+  function findSubmitButton(anchorEl) {
+    const selectors = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button[id*="login" i]',
+      'button[id*="signin" i]',
+      'button[id*="submit" i]',
+      'button[id*="next" i]',
+      'button[id*="continue" i]',
+      'input[type="button"][value*="Login" i]',
+      'input[type="button"][value*="Sign" i]',
+      'input[type="button"][value*="Next" i]',
+      'input[type="button"][value*="Continue" i]',
+      "button.btn-primary",
+      "button.button-primary",
+      "button.submit",
+      "button.login"
+    ];
+    const keywords = [/log\s*in/i, /sign\s*in/i, /next/i, /continue/i, /submit/i, /confirm/i, /verify/i];
+    let parent = anchorEl.parentElement;
+    for (let i = 0; i < 5 && parent; i++) {
+      for (const sel of selectors) {
+        const btn = parent.querySelector(sel);
+        if (btn) return btn;
+      }
+      const buttons2 = parent.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
+      for (const btn of buttons2) {
+        const text = btn.tagName === "INPUT" ? btn.value : btn.textContent;
+        if (keywords.some((regex) => regex.test(text))) {
+          return btn;
+        }
+      }
+      parent = parent.parentElement;
+    }
+    const form = anchorEl.form;
+    if (form) {
+      for (const sel of selectors) {
+        const btn = form.querySelector(sel);
+        if (btn) return btn;
+      }
+      const buttons2 = form.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
+      for (const btn of buttons2) {
+        const text = btn.tagName === "INPUT" ? btn.value : btn.textContent;
+        if (keywords.some((regex) => regex.test(text))) {
+          return btn;
+        }
+      }
+    }
+    for (const sel of selectors) {
+      const btn = document.querySelector(sel);
+      if (btn) return btn;
+    }
+    const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
+    for (const btn of buttons) {
+      const text = btn.tagName === "INPUT" ? btn.value : btn.textContent;
+      if (keywords.some((regex) => regex.test(text))) {
+        return btn;
+      }
+    }
+    return null;
+  }
+  function submitForm(anchorEl) {
+    const btn = findSubmitButton(anchorEl);
+    if (btn) {
+      if (btn.disabled) {
+        btn.disabled = false;
+        btn.removeAttribute("disabled");
+      }
+      btn.click();
+      return;
+    }
+    const form = anchorEl.form || document;
+    const pwField = isPasswordField(anchorEl) ? anchorEl : form.querySelector("input[type=password]");
+    const targetInput = pwField || anchorEl;
+    if (targetInput) {
+      const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 };
+      targetInput.dispatchEvent(new KeyboardEvent("keydown", opts));
+      targetInput.dispatchEvent(new KeyboardEvent("keypress", opts));
+      targetInput.dispatchEvent(new KeyboardEvent("keyup", opts));
+    }
+    if (anchorEl.form) {
+      anchorEl.form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      try {
+        anchorEl.form.submit();
+      } catch (e) {
+        console.warn("OKey form.submit() failed:", e);
+      }
+    }
+  }
   function attach(el) {
     if (tracked.has(el) || el.dataset.okeyIgnore) return;
-    if (!isPasswordField(el) && !isUsernameField(el)) return;
+    if (isButtonLike(el)) return;
+    if (!isPasswordField(el) && !isUsernameField(el) && !isTotpField(el)) return;
     tracked.add(el);
+    if (isPasswordField(el)) {
+      el.setAttribute("autocomplete", "new-password");
+    } else {
+      el.setAttribute("autocomplete", "off");
+    }
     const badge = document.createElement("div");
     badge.className = BADGE;
     badge.innerHTML = SVG_KEY;
@@ -2326,7 +2521,7 @@ zoo`.split("\n");
       badge.style.left = `${window.scrollX + r.right - size - 6}px`;
       badge.style.top = `${window.scrollY + r.top + (r.height - size) / 2}px`;
       badge.dataset.mode = isPasswordField(el) && !el.value ? "generate" : "fill";
-      badge.style.display = document.activeElement === el || el.value === "" || isUsernameField(el) ? "flex" : "flex";
+      badge.style.display = document.activeElement === el || el.value === "" || isUsernameField(el) || isTotpField(el) ? "flex" : "flex";
     };
     const show = () => {
       reposition();
@@ -2348,6 +2543,25 @@ zoo`.split("\n");
     });
     reposition();
     badge.style.display = "none";
+    if (activeSessionCred && Date.now() - activeSessionTime < 6e4) {
+      if (isPasswordField(el) && !el.value) {
+        setValue(el, activeSessionCred.password);
+        if (settings.autoSubmitEnabled) {
+          setTimeout(() => submitForm(el), 150);
+        }
+      } else if (isTotpField(el) && !el.value) {
+        if (activeSessionCred.totpSecret && isValidTotpSecret(activeSessionCred.totpSecret)) {
+          generateTOTP(activeSessionCred.totpSecret).then(({ code }) => {
+            if (code) {
+              setValue(el, code);
+              if (settings.autoSubmitEnabled) {
+                setTimeout(() => submitForm(el), 150);
+              }
+            }
+          }).catch(console.error);
+        }
+      }
+    }
   }
   function fillGenerated(passwordEl) {
     const pw = generatePassword({ length: 20 });
@@ -2361,21 +2575,129 @@ zoo`.split("\n");
   async function openPanel(anchorEl, badge) {
     closePanel();
     const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS, url: location.href }).catch(() => null);
+    if (res && res.settings) {
+      settings = { ...settings, ...res.settings };
+    }
     panelEl = document.createElement("div");
     panelEl.className = PANEL;
+    const resolvedTheme = settings.theme === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" : settings.theme;
+    panelEl.setAttribute("data-theme", resolvedTheme || "dark");
     if (!res || res.locked) {
-      panelEl.appendChild(row("\u{1F512} OKey is locked", "Click the toolbar icon to unlock", null));
+      panelEl.appendChild(header("OKey is locked"));
+      const container = document.createElement("div");
+      container.className = "okey-panel-lock-container";
+      container.style.cssText = "padding: 12px 10px; display: flex; flex-direction: column; gap: 10px;";
+      const labelEl = document.createElement("div");
+      labelEl.className = "okey-panel-sub";
+      labelEl.textContent = "Enter master PIN to unlock";
+      labelEl.style.cssText = "text-align: center; margin-bottom: 4px; font-weight: 500;";
+      container.appendChild(labelEl);
+      const pinInput = document.createElement("input");
+      pinInput.type = "password";
+      pinInput.placeholder = "Enter PIN";
+      pinInput.inputMode = "numeric";
+      pinInput.pattern = "[0-9]*";
+      pinInput.maxLength = 4;
+      pinInput.style.cssText = `
+      width: calc(100% - 24px);
+      margin-left: 12px;
+      padding: 10px 12px;
+      background: var(--okey-bg-elev-2, #222);
+      border: 1px solid var(--okey-brand, #00e676);
+      border-radius: 8px;
+      color: var(--okey-text, #fff);
+      font-size: 14px;
+      outline: none;
+      box-sizing: border-box;
+      letter-spacing: 0.5em;
+      text-align: center;
+    `;
+      container.appendChild(pinInput);
+      const errMsg = document.createElement("div");
+      errMsg.style.cssText = "font-size: 11px; color: var(--okey-danger, #f95766); display: none; text-align: center; margin-top: 4px;";
+      container.appendChild(errMsg);
+      panelEl.appendChild(container);
+      const doUnlock = async () => {
+        const pin = pinInput.value;
+        if (pin.length < 4) return;
+        pinInput.disabled = true;
+        errMsg.style.display = "none";
+        const unlockRes = await chrome.runtime.sendMessage({ type: MSG.UNLOCK_VAULT, pin }).catch(() => null);
+        if (unlockRes && unlockRes.success) {
+          openPanel(anchorEl, badge);
+        } else {
+          pinInput.disabled = false;
+          errMsg.textContent = unlockRes?.error || "Incorrect PIN";
+          errMsg.style.display = "block";
+          pinInput.value = "";
+          pinInput.focus();
+        }
+      };
+      pinInput.addEventListener("input", () => {
+        pinInput.value = pinInput.value.replace(/[^0-9]/g, "").slice(0, 4);
+        if (pinInput.value.length === 4) {
+          doUnlock();
+        }
+      });
+      setTimeout(() => pinInput.focus(), 50);
     } else {
-      if (res.matches.length) {
-        panelEl.appendChild(header(`For ${location.hostname.replace(/^www\./, "")}`));
-        res.matches.forEach((c) => panelEl.appendChild(credRow(c, anchorEl)));
-      } else {
-        panelEl.appendChild(header("No saved logins for this site"));
-      }
-      if (res.others.length) {
-        panelEl.appendChild(header("Other logins"));
-        res.others.forEach((c) => panelEl.appendChild(credRow(c, anchorEl)));
-      }
+      const searchContainer = document.createElement("div");
+      searchContainer.className = "okey-panel-search-container";
+      searchContainer.style.cssText = "padding: 6px 10px; border-bottom: 1px solid var(--okey-border, #444); display: flex;";
+      const searchInput = document.createElement("input");
+      searchInput.type = "text";
+      searchInput.placeholder = "Search logins...";
+      searchInput.className = "okey-panel-search-input";
+      searchInput.style.cssText = "width: 100%; padding: 6px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--okey-border, #444); background: var(--okey-bg-elev-2, #222); color: var(--okey-text, #fff); box-sizing: border-box; outline: none; font-family: inherit; transition: border-color 0.15s ease;";
+      searchInput.addEventListener("focus", () => {
+        searchInput.style.borderColor = "var(--okey-brand, #00e676)";
+      });
+      searchInput.addEventListener("blur", () => {
+        searchInput.style.borderColor = "var(--okey-border, #444)";
+      });
+      searchContainer.appendChild(searchInput);
+      panelEl.appendChild(searchContainer);
+      const listContainer = document.createElement("div");
+      listContainer.className = "okey-panel-list";
+      listContainer.style.cssText = "max-height: 180px; overflow-y: auto;";
+      panelEl.appendChild(listContainer);
+      const renderList = (query = "") => {
+        listContainer.innerHTML = "";
+        const q = query.toLowerCase().trim();
+        const matchedFiltered = res.matches.filter((c) => {
+          const name = (c.siteName || "").toLowerCase();
+          const dom = (c.domain || "").toLowerCase();
+          const user = (c.username || "").toLowerCase();
+          return name.includes(q) || dom.includes(q) || user.includes(q);
+        });
+        const othersFiltered = res.others.filter((c) => {
+          const name = (c.siteName || "").toLowerCase();
+          const dom = (c.domain || "").toLowerCase();
+          const user = (c.username || "").toLowerCase();
+          return name.includes(q) || dom.includes(q) || user.includes(q);
+        });
+        if (matchedFiltered.length) {
+          listContainer.appendChild(header(`For ${location.hostname.replace(/^www\./, "")}`));
+          matchedFiltered.forEach((c) => listContainer.appendChild(credRow(c, anchorEl)));
+        } else if (!q) {
+          listContainer.appendChild(header("No saved logins for this site"));
+        }
+        if (othersFiltered.length) {
+          listContainer.appendChild(header("Other logins"));
+          const displayOthers = q ? othersFiltered : othersFiltered.slice(0, 3);
+          displayOthers.forEach((c) => listContainer.appendChild(credRow(c, anchorEl)));
+        }
+      };
+      renderList("");
+      searchInput.addEventListener("input", () => renderList(searchInput.value));
+      const div = document.createElement("div");
+      div.className = "okey-panel-divider";
+      panelEl.appendChild(div);
+      panelEl.appendChild(row("+ Add new login", "Save credential for this site", () => {
+        closePanel();
+        openAddModal(anchorEl);
+      }));
+      setTimeout(() => searchInput.focus(), 50);
     }
     const r = badge.getBoundingClientRect();
     panelEl.style.left = `${Math.max(8, window.scrollX + r.right - 280)}px`;
@@ -2389,6 +2711,108 @@ zoo`.split("\n");
   function closePanel() {
     panelEl?.remove();
     panelEl = null;
+  }
+  function escapeHtml(str) {
+    if (!str) return "";
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+  function closeAddModal() {
+    const overlay = document.querySelector(".okey-overlay");
+    if (overlay) overlay.remove();
+  }
+  function openAddModal(anchorEl) {
+    closeAddModal();
+    const overlay = document.createElement("div");
+    overlay.className = "okey-overlay";
+    const modal = document.createElement("div");
+    modal.className = "okey-modal";
+    const resolvedTheme = settings.theme === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" : settings.theme;
+    modal.setAttribute("data-theme", resolvedTheme || "dark");
+    const titleVal = document.title.split("|")[0].split("-")[0].trim() || location.hostname;
+    const domainVal = location.hostname.replace(/^www\./, "");
+    const usernameVal = "";
+    const passwordVal = "";
+    modal.innerHTML = `
+    <h3 class="okey-modal-title">Add Login to OKey</h3>
+    
+    <div class="okey-modal-field">
+      <label class="okey-modal-label">Site Name</label>
+      <input type="text" class="okey-modal-input" id="okey-add-sitename" value="${escapeHtml(titleVal)}" placeholder="e.g. Google">
+    </div>
+    
+    <div class="okey-modal-field">
+      <label class="okey-modal-label">Domain</label>
+      <input type="text" class="okey-modal-input" id="okey-add-domain" value="${escapeHtml(domainVal)}" placeholder="e.g. google.com">
+    </div>
+    
+    <div class="okey-modal-field">
+      <label class="okey-modal-label">Username / Email</label>
+      <input type="text" class="okey-modal-input" id="okey-add-username" value="${escapeHtml(usernameVal)}" placeholder="Enter username or email" autocomplete="new-password">
+    </div>
+    
+    <div class="okey-modal-field">
+      <label class="okey-modal-label">Password</label>
+      <div class="okey-modal-input-group">
+        <input type="text" class="okey-modal-input" id="okey-add-password" value="${escapeHtml(passwordVal)}" placeholder="Password" autocomplete="new-password">
+        <button type="button" class="okey-modal-affix-btn" id="okey-add-gen">Generate</button>
+      </div>
+    </div>
+
+    <div class="okey-modal-field">
+      <label class="okey-modal-label">TOTP Secret <span style="font-weight:normal;opacity:0.6;">(optional)</span></label>
+      <input type="text" class="okey-modal-input" id="okey-add-totp" placeholder="Base32 secret">
+    </div>
+    
+    <div class="okey-modal-buttons">
+      <button type="button" class="okey-modal-btn okey-modal-btn-secondary" id="okey-add-cancel">Cancel</button>
+      <button type="button" class="okey-modal-btn okey-modal-btn-primary" id="okey-add-save">Save & Autofill</button>
+    </div>
+  `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) {
+        closeAddModal();
+      }
+    });
+    modal.querySelector("#okey-add-gen").addEventListener("click", () => {
+      const pwInput = modal.querySelector("#okey-add-password");
+      pwInput.value = generatePassword(settings.passwordGeneratorDefaults || { length: 20 });
+    });
+    modal.querySelector("#okey-add-cancel").addEventListener("click", () => {
+      closeAddModal();
+    });
+    modal.querySelector("#okey-add-save").addEventListener("click", async () => {
+      const siteName = modal.querySelector("#okey-add-sitename").value.trim();
+      const domain = modal.querySelector("#okey-add-domain").value.trim();
+      const username = modal.querySelector("#okey-add-username").value.trim();
+      const password = modal.querySelector("#okey-add-password").value;
+      const totpSecret = modal.querySelector("#okey-add-totp").value.replace(/\s+/g, "");
+      if (!siteName && !domain) {
+        alert("Please provide a Site Name or Domain.");
+        return;
+      }
+      if (totpSecret && !isValidTotpSecret(totpSecret)) {
+        alert("Invalid TOTP secret (must be base32).");
+        return;
+      }
+      const data = {
+        siteName,
+        domain: domain.toLowerCase(),
+        username,
+        password,
+        totpSecret,
+        entryType: "password"
+      };
+      const res = await chrome.runtime.sendMessage({ type: MSG.ADD_CREDENTIAL, data }).catch(() => null);
+      if (res && res.success && res.entry) {
+        closeAddModal();
+        fillAndRememberCredential(anchorEl, res.entry);
+        toast("Saved & filled by OKey");
+      } else {
+        alert(res?.error || "Failed to save credential. Please ensure OKey is unlocked.");
+      }
+    });
   }
   function header(text) {
     const d = document.createElement("div");
@@ -2405,9 +2829,20 @@ zoo`.split("\n");
     if (onclick) d.addEventListener("click", onclick);
     return d;
   }
+  function fillAndRememberCredential(anchorEl, cred) {
+    activeSessionCred = cred;
+    activeSessionTime = Date.now();
+    chrome.runtime.sendMessage({ type: MSG.SET_ACTIVE_FILLING_SESSION, cred }).catch(() => {
+    });
+    fillCredential(anchorEl, cred);
+    startAutofillPolling();
+    if (settings.autoSubmitEnabled) {
+      setTimeout(() => submitForm(anchorEl), 150);
+    }
+  }
   function credRow(cred, anchorEl) {
     const d = row(cred.siteName || cred.domain, cred.username || "(no username)", () => {
-      fillCredential(anchorEl, cred);
+      fillAndRememberCredential(anchorEl, cred);
       closePanel();
     });
     return d;
@@ -2418,14 +2853,26 @@ zoo`.split("\n");
     const userField = isUsernameField(anchorEl) ? anchorEl : [...form.querySelectorAll("input")].find(isUsernameField);
     if (userField && cred.username) setValue(userField, cred.username);
     if (pwField && cred.password) setValue(pwField, cred.password);
+    const totpEl = [...form.querySelectorAll("input")].find(isTotpField);
+    if (totpEl && cred.totpSecret && isValidTotpSecret(cred.totpSecret)) {
+      generateTOTP(cred.totpSecret).then(({ code }) => {
+        if (code) setValue(totpEl, code);
+      }).catch(console.error);
+    }
     toast("Filled by OKey");
   }
   function setValue(el, value) {
+    el.focus();
     const proto = Object.getPrototypeOf(el);
     const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
     setter ? setter.call(el, value) : el.value = value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+    const opts = { bubbles: true, cancelable: true };
+    el.dispatchEvent(new KeyboardEvent("keydown", opts));
+    el.dispatchEvent(new KeyboardEvent("keypress", opts));
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    el.blur();
   }
   function toast(text) {
     const t = document.createElement("div");
@@ -2433,6 +2880,57 @@ zoo`.split("\n");
     t.textContent = text;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 2200);
+  }
+  var autofillPollInterval = null;
+  var autofillPollStart = 0;
+  function startAutofillPolling() {
+    if (autofillPollInterval) clearInterval(autofillPollInterval);
+    autofillPollStart = Date.now();
+    autofillPollInterval = setInterval(() => {
+      if (Date.now() - autofillPollStart > 6e4 || !activeSessionCred) {
+        stopAutofillPolling();
+        return;
+      }
+      const inputs = document.querySelectorAll("input");
+      for (const el of inputs) {
+        if (isButtonLike(el)) continue;
+        if (isPasswordField(el) && el.offsetParent !== null && !el.value) {
+          setValue(el, activeSessionCred.password);
+          toast("Autofilled by OKey");
+          if (settings.autoSubmitEnabled) {
+            setTimeout(() => submitForm(el), 150);
+          }
+        } else if (isTotpField(el) && el.offsetParent !== null && !el.value) {
+          if (activeSessionCred.totpSecret && isValidTotpSecret(activeSessionCred.totpSecret)) {
+            const savedCred = activeSessionCred;
+            activeSessionCred = null;
+            generateTOTP(savedCred.totpSecret).then(({ code }) => {
+              activeSessionCred = savedCred;
+              if (code && !el.value) {
+                setValue(el, code);
+                toast("Autofilled by OKey");
+                chrome.runtime.sendMessage({ type: MSG.CLEAR_ACTIVE_FILLING_SESSION }).catch(() => {
+                });
+                activeSessionCred = null;
+                stopAutofillPolling();
+                if (settings.autoSubmitEnabled) {
+                  setTimeout(() => submitForm(el), 150);
+                }
+              }
+            }).catch((err) => {
+              activeSessionCred = savedCred;
+              console.error(err);
+            });
+          }
+        }
+      }
+    }, 500);
+  }
+  function stopAutofillPolling() {
+    if (autofillPollInterval) {
+      clearInterval(autofillPollInterval);
+      autofillPollInterval = null;
+    }
   }
   function scan(root = document) {
     root.querySelectorAll?.("input").forEach(attach);
@@ -2464,5 +2962,32 @@ zoo`.split("\n");
       bindContentActivityTracking();
     });
   }
+  chrome.runtime.sendMessage({ type: MSG.GET_SETTINGS }).then((res) => {
+    if (res?.success && res.settings) {
+      settings = { ...settings, ...res.settings };
+    }
+  }).catch(() => {
+  });
+  chrome.runtime.sendMessage({ type: MSG.GET_ACTIVE_FILLING_SESSION }).then((res) => {
+    if (res?.success && res.session) {
+      activeSessionCred = res.session.cred;
+      activeSessionTime = res.session.timestamp;
+      startAutofillPolling();
+    }
+  }).catch(() => {
+  });
+  chrome.runtime.onMessage.addListener((m) => {
+    if (m.type === MSG.UPDATE_SETTINGS && m.settings) {
+      settings = { ...settings, ...m.settings };
+      const resolvedTheme = settings.theme === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" : settings.theme;
+      if (panelEl) {
+        panelEl.setAttribute("data-theme", resolvedTheme);
+      }
+      const modal = document.querySelector(".okey-modal");
+      if (modal) {
+        modal.setAttribute("data-theme", resolvedTheme);
+      }
+    }
+  });
 })();
 //# sourceMappingURL=content.js.map

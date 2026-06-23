@@ -51,10 +51,12 @@ async function loadStartupData() {
       renderMain();
     }
 
-    const [ver, cfg, dash] = await Promise.all([
+    const [ver, cfg, dash, remoteSettings, health] = await Promise.all([
       sync.checkVersion().catch((err) => { console.error("Version check error:", err); return null; }),
       sync._call('config').catch((err) => { console.error("Config check error:", err); return null; }),
-      sync.fetchDashboard().catch((err) => { console.error("Dashboard fetch error:", err); return null; })
+      sync.fetchDashboard().catch((err) => { console.error("Dashboard fetch error:", err); return null; }),
+      sync.pullSettings().catch((err) => { console.error("Settings pull error:", err); return null; }),
+      sync._call('health').catch((err) => { console.error("Health check error:", err); return null; })
     ]);
 
     if (ver) {
@@ -68,6 +70,14 @@ async function loadStartupData() {
     if (dash) {
       dashboardData = dash;
       await store.set({ [STORAGE_KEYS.BACKEND_DASHBOARD]: dashboardData });
+    }
+    if (remoteSettings) {
+      settings = { ...settings, ...remoteSettings };
+      await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+      if (typeof applyTheme === 'function') applyTheme(settings.theme);
+    }
+    if (health) {
+      await store.set({ 'okey_backend_health': health });
     }
 
     if (view.name === 'main') {
@@ -120,6 +130,11 @@ function h(tag, props = {}, ...kids) {
     else if (v !== null && v !== undefined && v !== false) e.setAttribute(k, v);
   }
   for (const kid of kids.flat()) { if (kid == null || kid === false) continue; e.append(kid.nodeType ? kid : document.createTextNode(String(kid))); }
+  if (tag === 'input' && e.getAttribute('inputmode') === 'numeric' && e.getAttribute('maxlength') === '4') {
+    e.addEventListener('input', () => {
+      e.value = e.value.replace(/[^0-9]/g, '').slice(0, 4);
+    });
+  }
   return e;
 }
 const clear = (n) => n.replaceChildren();
@@ -330,7 +345,7 @@ function renderLocked() {
   btn.addEventListener('click', go);
   app.append(screen('OKey', h('div', { class: 'vs-field' }, pw), btn,
     h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:10px', text: 'Forgot PIN? Recover', onclick: renderRecover }),
-    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:32px;color:var(--vs-danger);border:1px solid var(--vs-danger);opacity:0.8', text: 'Reset vault & start fresh', onclick: handleStartFresh })));
+    h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:32px;color:white;border:1px solid var(--vs-danger);background:var(--vs-danger)', text: 'Reset vault & start fresh', onclick: handleStartFresh })));
 }
 
 async function handleStartFresh() {
@@ -760,26 +775,56 @@ function renderChangeMasterPassword() {
 }
 
 // ============================ settings ============================
-async function renderSettings() {
-  view.name = 'settings';
-  if (await sync.getActiveProfile()) {
-    try {
-      const remote = await sync.pullSettings();
-      if (remote) {
-        settings = { ...settings, ...remote };
-        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        applyTheme(settings.theme);
-      }
-    } catch (e) {
-      console.error("Failed to pull and merge remote settings:", e);
+async function populateHealthWidget(healthWidget) {
+  const profile = await sync.getActiveProfile();
+  if (!profile?.appsScriptUrl) {
+    const dot = healthWidget.querySelector('.okey-health-dot');
+    const text = healthWidget.querySelector('.okey-health-status-text');
+    const details = healthWidget.querySelector('.okey-health-details');
+    if (dot && text && details) {
+      dot.style.background = '#9ca3af';
+      text.textContent = 'Offline (No vault connected)';
+      details.style.display = 'none';
+    }
+    return;
+  }
+
+  const cached = await store.get('okey_backend_health');
+  const res = cached['okey_backend_health'];
+  const dot = healthWidget.querySelector('.okey-health-dot');
+  const text = healthWidget.querySelector('.okey-health-status-text');
+  const details = healthWidget.querySelector('.okey-health-details');
+  if (dot && text && details) {
+    if (res && res.status === 'ok') {
+      dot.style.background = 'var(--vs-success)';
+      text.textContent = 'Active (Connected)';
+      details.style.display = 'block';
+      clear(details);
+      details.append(
+        h('div', {}, `Apps Script: v${res.version || '1.0.0'}`),
+        h('div', {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
+        h('div', { style: 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || 'N/A'}`)
+      );
+    } else {
+      dot.style.background = '#9ca3af';
+      text.textContent = 'Connection status cached at sync/launch';
+      details.style.display = 'none';
     }
   }
+}
+
+function renderSettings() {
+  view.name = 'settings';
 
   clear(app);
   const themeSel = h('select', { class: 'vs-select' }, ...['system', 'dark', 'light'].map((t) => h('option', { value: t, selected: settings.theme === t }, t)));
   themeSel.addEventListener('change', () => { saveSettings({ theme: themeSel.value }); applyTheme(themeSel.value); });
   const clientId = h('input', { class: 'vs-input', value: getGoogleClientId(), placeholder: 'Google OAuth Client ID' });
-  const sheetUrl = h('input', { class: 'vs-input', value: (await sync.getActiveProfile())?.appsScriptUrl || '', placeholder: 'Apps Script /exec URL' });
+  const sheetUrl = h('input', { class: 'vs-input', placeholder: 'Apps Script /exec URL' });
+
+  sync.getActiveProfile().then((profile) => {
+    if (profile?.appsScriptUrl) sheetUrl.value = profile.appsScriptUrl;
+  }).catch(console.error);
 
   // Health check status widget
   const healthWidget = h('div', { class: 'okey-health-widget vs-glass', style: 'padding: 8px 12px; margin-top: 8px; border-radius: 8px; font-size: 11px; border: 1px solid var(--vs-border);' },
@@ -790,63 +835,35 @@ async function renderSettings() {
     h('div', { class: 'okey-health-details vs-faint', style: 'margin-top: 6px; display:none; line-height: 1.4;' })
   );
 
-  clearTimeout(healthTimer);
-  const pollHealth = async () => {
-    if (view.name !== 'settings') {
-      clearTimeout(healthTimer);
-      return;
-    }
-    const profile = await sync.getActiveProfile();
-    if (!profile?.appsScriptUrl) {
-      const dot = healthWidget.querySelector('.okey-health-dot');
-      const text = healthWidget.querySelector('.okey-health-status-text');
-      const details = healthWidget.querySelector('.okey-health-details');
-      if (dot && text && details) {
-        dot.style.background = '#9ca3af';
-        text.textContent = 'Offline (No vault connected)';
-        details.style.display = 'none';
-      }
-      return;
-    }
-
-    try {
-      const res = await sync._call('health');
-      if (res && res.status === 'ok') {
-        const dot = healthWidget.querySelector('.okey-health-dot');
-        const text = healthWidget.querySelector('.okey-health-status-text');
-        const details = healthWidget.querySelector('.okey-health-details');
-        if (dot && text && details) {
-          dot.style.background = 'var(--vs-success)';
-          text.textContent = 'Active (Connected)';
-          details.style.display = 'block';
-          clear(details);
-          details.append(
-            h('div', {}, `Apps Script: v${res.version || '1.0.0'}`),
-            h('div', {}, `Spreadsheet Count: ${res.vaultEntries ?? 0} entries`),
-            h('div', { style: 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: res.sheetUrl }, `Sheet URL: ${res.sheetUrl || 'N/A'}`)
-          );
-        }
-      }
-    } catch (e) {
-      const dot = healthWidget.querySelector('.okey-health-dot');
-      const text = healthWidget.querySelector('.okey-health-status-text');
-      const details = healthWidget.querySelector('.okey-health-details');
-      if (dot && text && details) {
-        dot.style.background = 'var(--vs-error)';
-        text.textContent = `Offline (${e.message || 'Connection failed'})`;
-        details.style.display = 'none';
-      }
-    }
-    healthTimer = setTimeout(pollHealth, 20000);
-  };
-  pollHealth();
+  const miniAutoLockOptions = [
+    { text: '1m', value: 60 },
+    { text: '5m', value: 300 },
+    { text: '10m', value: 600 },
+    { text: '30m', value: 1800 },
+    { text: '1h', value: 3600 },
+    { text: '2h', value: 7200 },
+    { text: '6h', value: 21600 }
+  ];
+  const miniLockVal = settings.miniAutoLockTimeout || 300;
+  const miniLockSel = h('select', { class: 'vs-select', style: 'width:90px' },
+    ...miniAutoLockOptions.map((opt) => h('option', { value: opt.value, selected: Number(miniLockVal) === opt.value }, opt.text))
+  );
+  miniLockSel.addEventListener('change', () => saveSettings({ miniAutoLockTimeout: Number(miniLockSel.value) }));
+  const miniLock = h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Mini-view auto-lock' }), miniLockSel);
 
   app.append(h('div', { class: 'okey-view' }, appbar('Settings', renderMain),
     group('Security',
       numberSetting('Auto-lock (seconds)', settings.autoLockTimeout, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS, (v) => saveSettings({ autoLockTimeout: v })),
+      miniLock,
       numberSetting('Clipboard clear (seconds)', settings.clipboardClearTimeout, SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS, (v) => saveSettings({ clipboardClearTimeout: v })),
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Change master PIN' }), h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: 'Change', onclick: renderChangeMasterPassword })),
       h('div', { class: 'okey-setting' }, h('div', { class: 'okey-setting-main', text: 'Theme' }), themeSel)),
+    group('Autofill Preferences',
+      toggleRow('Auto-fill on single match', settings.autoFillSingleMatch, (v) => saveSettings({ autoFillSingleMatch: v })),
+      toggleRow('Auto-submit after fill', settings.autoSubmitEnabled, (v) => saveSettings({ autoSubmitEnabled: v })),
+      h('div', { class: 'vs-faint', style: 'margin-top: 8px; font-size: 11px; line-height: 1.4;' },
+        'Tip: To prevent browser autofill popups from overlapping with OKey, disable the browser\'s built-in "Offer to save passwords" and "Autofill" settings.'
+      )),
     group('Sync (optional)',
       h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Google OAuth Client ID' }), clientId),
       h('div', { class: 'vs-field' }, h('label', { class: 'vs-label', text: 'Apps Script URL' }), sheetUrl),
@@ -881,6 +898,8 @@ async function renderSettings() {
       h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', text: 'Password generator', onclick: renderGenerator }),
       h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', style: 'margin-top:8px', text: 'Lock now', onclick: () => { vault.lock(); clearSession(); renderLocked(); } }),
       h('div', { class: 'vs-faint', style: 'text-align:center;margin-top:12px', text: 'OKey 1.0.0 · zero-knowledge · Argon2id' }))));
+
+  populateHealthWidget(healthWidget).catch(console.error);
 }
 
 async function importFile(ev) {
@@ -911,6 +930,28 @@ async function doSync() {
     }
 
     const r = await sync.sync(vault);
+    
+    // Pull settings and health check after sync
+    try {
+      const remote = await sync.pullSettings();
+      if (remote) {
+        settings = { ...settings, ...remote };
+        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        if (typeof applyTheme === 'function') applyTheme(settings.theme);
+      }
+    } catch (e) {
+      console.error("Failed to pull settings after sync:", e);
+    }
+    
+    try {
+      const health = await sync._call('health');
+      if (health) {
+        await store.set({ 'okey_backend_health': health });
+      }
+    } catch (e) {
+      console.error("Failed to get health after sync:", e);
+    }
+
     await store.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
     await sync.getFolders(true).catch(() => {});
     await refreshDashboardAfterSync().catch(() => {});

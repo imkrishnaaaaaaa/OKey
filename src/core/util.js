@@ -36,7 +36,7 @@ export function debounce(fn, ms) {
 
 /** Human-friendly relative time. */
 export function formatTimeAgo(isoString, nowMs = Date.now()) {
-  if (!isoString) return '';
+  if (!isoString || isoString.startsWith('1970-01-01')) return 'Never';
   const diff = nowMs - new Date(isoString).getTime();
   const m = Math.floor(diff / 60000);
   if (m < 1) return 'just now';

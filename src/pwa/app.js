@@ -274,6 +274,15 @@ function renderRestoreFromSheet() {
       const remoteData = await sync.pullVault();
       
       await vault.restoreFromRemote(pw.value, remoteData.metadata, remoteData.entries);
+
+      // Pull and apply settings from sheet
+      const remoteSettings = await sync.pullSettings().catch(() => null);
+      if (remoteSettings) {
+        settings = { ...settings, ...remoteSettings };
+        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        if (typeof applyTheme === 'function') applyTheme(settings.theme);
+      }
+
       cacheDek(vault.exportDek(), settings.autoLockTimeout);
       showFloatingLock();
       toast('Vault restored successfully', 'success');

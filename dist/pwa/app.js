@@ -18436,7 +18436,7 @@ function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 function formatTimeAgo(isoString, nowMs = Date.now()) {
-  if (!isoString) return "";
+  if (!isoString || isoString.startsWith("1970-01-01")) return "Never";
   const diff = nowMs - new Date(isoString).getTime();
   const m = Math.floor(diff / 6e4);
   if (m < 1) return "just now";
@@ -20133,6 +20133,12 @@ function renderRestoreFromSheet() {
       const profile = await sync.addProfile({ label: "Restored Vault", appsScriptUrl: trimmedUrl });
       const remoteData = await sync.pullVault();
       await vault.restoreFromRemote(pw.value, remoteData.metadata, remoteData.entries);
+      const remoteSettings = await sync.pullSettings().catch(() => null);
+      if (remoteSettings) {
+        settings = { ...settings, ...remoteSettings };
+        await store.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        if (typeof applyTheme === "function") applyTheme(settings.theme);
+      }
       cacheDek(vault.exportDek(), settings.autoLockTimeout);
       showFloatingLock();
       toast("Vault restored successfully", "success");

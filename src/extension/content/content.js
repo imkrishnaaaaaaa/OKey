@@ -20,6 +20,23 @@ let panelEl = null;
 let settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
 let activeSessionCred = null;
 let activeSessionTime = 0;
+let singleMatchAttempted = false;
+
+async function triggerSingleMatchAutofill() {
+  if (singleMatchAttempted || activeSessionCred) return;
+  
+  const inputs = [...document.querySelectorAll('input')];
+  const anchorEl = inputs.find(el => (isUsernameField(el) || isPasswordField(el)) && el.offsetParent !== null && !el.value);
+  if (!anchorEl) return;
+  
+  singleMatchAttempted = true;
+  
+  const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS, url: location.href }).catch(() => null);
+  if (res && !res.locked && res.matches && res.matches.length === 1) {
+    const cred = res.matches[0];
+    fillAndRememberCredential(anchorEl, cred);
+  }
+}
 
 const SVG_KEY =
   '<svg viewBox="0 0 24 24" fill="none" width="14" height="14"><rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#fff" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#fff" stroke-width="2"/></svg>';
@@ -30,8 +47,10 @@ function isPasswordField(el) {
 function isUsernameField(el) {
   if (el.tagName !== 'INPUT') return false;
   if (!['text', 'email', 'tel', ''].includes(el.type)) return false;
-  const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder}`.toLowerCase();
-  return /user|email|login|account|phone|mobile/.test(hay) || el.autocomplete === 'username';
+  const aria = el.getAttribute('aria-label') || '';
+  const jsname = el.getAttribute('jsname') || '';
+  const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder} ${aria} ${jsname}`.toLowerCase();
+  return /user|email|login|account|phone|mobile|identifier/.test(hay) || el.autocomplete === 'username';
 }
 function isTotpField(el) {
   if (el.tagName !== 'INPUT') return false;
@@ -52,6 +71,7 @@ function isButtonLike(el) {
 
 function findSubmitButton(anchorEl) {
   const selectors = [
+    'button[jsname="LgbsSe"]', 'button.VfPpkd-LgbsSe',
     'button[type="submit"]', 'input[type="submit"]',
     'button[id*="login" i]', 'button[id*="signin" i]', 'button[id*="submit" i]', 'button[id*="next" i]', 'button[id*="continue" i]',
     'input[type="button"][value*="Login" i]', 'input[type="button"][value*="Sign" i]', 'input[type="button"][value*="Next" i]', 'input[type="button"][value*="Continue" i]',
@@ -113,10 +133,13 @@ function findSubmitButton(anchorEl) {
 function submitForm(anchorEl) {
   const btn = findSubmitButton(anchorEl);
   if (btn) {
-    if (btn.disabled) {
+    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
       btn.disabled = false;
       btn.removeAttribute('disabled');
+      btn.setAttribute('aria-disabled', 'false');
     }
+    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     btn.click();
     return;
   }
@@ -156,7 +179,14 @@ function attach(el) {
   badge.className = BADGE;
   badge.innerHTML = SVG_KEY;
   badge.title = 'OKey';
-  document.body.appendChild(badge);
+
+  if (document.body) {
+    document.body.appendChild(badge);
+  } else {
+    document.addEventListener('DOMContentLoaded', () => {
+      try { document.body.appendChild(badge); reposition(); } catch (e) {}
+    });
+  }
 
   const reposition = () => {
     const r = el.getBoundingClientRect();
@@ -167,10 +197,17 @@ function attach(el) {
     badge.style.top = `${window.scrollY + r.top + (r.height - size) / 2}px`;
     // Generate-on-empty only for password fields (feedback #19)
     badge.dataset.mode = isPasswordField(el) && !el.value ? 'generate' : 'fill';
-    badge.style.display = document.activeElement === el || el.value === '' || isUsernameField(el) || isTotpField(el) ? 'flex' : 'flex';
+    
+    const shouldShow = document.activeElement === el || el.value === '' || isUsernameField(el) || isTotpField(el);
+    badge.style.display = shouldShow ? 'flex' : 'none';
+
+    // Single match autofill check
+    if (settings.autoFillSingleMatch && !singleMatchAttempted && !activeSessionCred) {
+      triggerSingleMatchAutofill();
+    }
   };
 
-  const show = () => { reposition(); badge.style.display = 'flex'; };
+  const show = () => { reposition(); };
   const hideSoon = () => setTimeout(() => { if (document.activeElement !== el && !badge.matches(':hover')) badge.style.display = 'none'; }, 150);
 
   el.addEventListener('focus', show);
@@ -179,10 +216,15 @@ function attach(el) {
   window.addEventListener('scroll', reposition, true);
   window.addEventListener('resize', reposition);
 
+  // ResizeObserver for reliable dynamic layout rendering in SPAs
+  const ro = new ResizeObserver(() => {
+    reposition();
+  });
+  ro.observe(el);
+
   badge.addEventListener('mousedown', (e) => e.preventDefault());
   badge.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (badge.dataset.mode === 'generate') return fillGenerated(el);
     openPanel(el, badge);
   });
 
@@ -377,6 +419,13 @@ async function openPanel(anchorEl, badge) {
       closePanel();
       openAddModal(anchorEl);
     }));
+
+    if (isPasswordField(anchorEl)) {
+      panelEl.appendChild(row('⚡ Generate strong password', 'Create and copy a secure password', () => {
+        closePanel();
+        fillGenerated(anchorEl);
+      }));
+    }
 
     setTimeout(() => searchInput.focus(), 50);
   }
@@ -586,9 +635,25 @@ function fillCredential(anchorEl, cred) {
 
 function setValue(el, value) {
   el.focus();
-  const proto = Object.getPrototypeOf(el);
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  setter ? setter.call(el, value) : (el.value = value);
+  try {
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    const protoSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+    const setter = nativeSetter || protoSetter;
+    if (setter) {
+      setter.call(el, value);
+    } else {
+      el.value = value;
+    }
+  } catch (e) {
+    el.value = value;
+  }
+  
+  // Dispatch InputEvent for SPA state bindings
+  try {
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+  } catch (e) {
+    // Fallback
+  }
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
   
@@ -668,6 +733,9 @@ function stopAutofillPolling() {
 
 // ---- scan & observe ----
 function scan(root = document) {
+  if (root.tagName === 'INPUT') {
+    attach(root);
+  }
   root.querySelectorAll?.('input').forEach(attach);
 }
 const mo = new MutationObserver((muts) => {
@@ -687,21 +755,16 @@ function bindContentActivityTracking() {
   });
 }
 
-if (document.body) {
-  scan();
-  mo.observe(document.body, { childList: true, subtree: true });
-  bindContentActivityTracking();
-} else {
-  document.addEventListener('DOMContentLoaded', () => {
-    scan();
-    mo.observe(document.body, { childList: true, subtree: true });
-    bindContentActivityTracking();
-  });
-}
+scan();
+mo.observe(document.documentElement, { childList: true, subtree: true });
+bindContentActivityTracking();
 
 chrome.runtime.sendMessage({ type: MSG.GET_SETTINGS }).then((res) => {
   if (res?.success && res.settings) {
     settings = { ...settings, ...res.settings };
+    if (settings.autoFillSingleMatch) {
+      triggerSingleMatchAutofill();
+    }
   }
 }).catch(() => {});
 

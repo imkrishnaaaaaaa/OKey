@@ -384,6 +384,16 @@ function renderRestoreFromSheet() {
       const remoteData = await sync.pullVault();
       
       await vault.restoreFromRemote(pw.value, remoteData.metadata, remoteData.entries);
+
+      // Pull and apply settings from sheet
+      const remoteSettings = await sync.pullSettings().catch(() => null);
+      if (remoteSettings) {
+        settings = { ...settings, ...remoteSettings };
+        await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+        if (typeof applyTheme === 'function') applyTheme(settings.theme);
+      }
+
       await cacheDek(vault.exportDek(), settings.autoLockTimeout);
       toast('Vault restored successfully', 'success');
       renderMain();
@@ -1197,7 +1207,8 @@ function renderSettings(scrollTop = 0) {
   sync.getProfiles().then(renderProfiles).catch(console.error);
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((res) => {
     const lastSync = res[STORAGE_KEYS.LAST_SYNC_AT];
-    lastSyncLabel.textContent = lastSync ? `Last synced ${formatTimeAgo(lastSync)}` : 'Never synced';
+    const ago = formatTimeAgo(lastSync);
+    lastSyncLabel.textContent = ago === 'Never' ? 'Never synced' : `Last synced ${ago}`;
   }).catch(console.error);
 
   populateHealthWidget(healthWidget).catch(console.error);
@@ -1478,7 +1489,8 @@ function renderFooter() {
 
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {
     const lastSync = s[STORAGE_KEYS.LAST_SYNC_AT];
-    syncLabel.textContent = lastSync ? `Last synced: ${formatTimeAgo(lastSync)}` : 'Never synced';
+    const ago = formatTimeAgo(lastSync);
+    syncLabel.textContent = ago === 'Never' ? 'Never synced' : `Last synced: ${ago}`;
   });
   return h('div', { class: 'okey-footer vs-glass' },
     h('span', { class: 'okey-sync-dot' + (syncStatus && syncStatus !== 'idle' ? ' ' + syncStatus : '') }),

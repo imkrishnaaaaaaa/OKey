@@ -2376,7 +2376,8 @@ zoo`.split("\n");
   // src/extension/content/content.js
   var BADGE = "okey-badge";
   var PANEL = "okey-panel";
-  var tracked = /* @__PURE__ */ new WeakSet();
+  var tracked = /* @__PURE__ */ new WeakMap();
+  var repositionRegistry = /* @__PURE__ */ new Set();
   var panelEl = null;
   var settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
   var activeSessionCred = null;
@@ -2394,7 +2395,7 @@ zoo`.split("\n");
       fillAndRememberCredential(anchorEl, cred);
     }
   }
-  var SVG_KEY = '<svg viewBox="0 0 24 24" fill="none" width="14" height="14"><rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#fff" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#fff" stroke-width="2"/></svg>';
+  var SVG_KEY = '<svg viewBox="0 0 24 24" fill="none" width="13" height="13"><rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#6d5efc" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#6d5efc" stroke-width="2"/><circle cx="12" cy="15.5" r="1.4" fill="#6d5efc"/></svg>';
   function isPasswordField(el) {
     return el.tagName === "INPUT" && el.type === "password";
   }
@@ -2515,11 +2516,19 @@ zoo`.split("\n");
       }
     }
   }
+  function repositionAll() {
+    repositionRegistry.forEach((fn) => {
+      try {
+        fn();
+      } catch (e) {
+      }
+    });
+  }
   function attach(el) {
     if (tracked.has(el) || el.dataset.okeyIgnore) return;
     if (isButtonLike(el)) return;
     if (!isPasswordField(el) && !isUsernameField(el) && !isTotpField(el)) return;
-    tracked.add(el);
+    tracked.set(el, null);
     if (isPasswordField(el)) {
       el.setAttribute("autocomplete", "new-password");
     } else {
@@ -2546,7 +2555,7 @@ zoo`.split("\n");
         badge.style.display = "none";
         return;
       }
-      const size = r.height < 30 ? 16 : 20;
+      const size = r.height < 30 ? 18 : 22;
       badge.style.width = badge.style.height = `${size}px`;
       badge.style.left = `${window.scrollX + r.right - size - 6}px`;
       badge.style.top = `${window.scrollY + r.top + (r.height - size) / 2}px`;
@@ -2557,6 +2566,8 @@ zoo`.split("\n");
         triggerSingleMatchAutofill();
       }
     };
+    tracked.set(el, reposition);
+    repositionRegistry.add(reposition);
     const show = () => {
       reposition();
     };
@@ -2572,6 +2583,13 @@ zoo`.split("\n");
       reposition();
     });
     ro.observe(el);
+    const removalObserver = new MutationObserver(() => {
+      if (!document.contains(el)) {
+        repositionRegistry.delete(reposition);
+        removalObserver.disconnect();
+      }
+    });
+    removalObserver.observe(document, { childList: true, subtree: true });
     badge.addEventListener("mousedown", (e) => e.preventDefault());
     badge.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -3012,6 +3030,26 @@ zoo`.split("\n");
   scan();
   mo.observe(document.documentElement, { childList: true, subtree: true });
   bindContentActivityTracking();
+  (function initSmartReposition() {
+    if (document.readyState === "complete") return;
+    let pageLoaded = false;
+    const doReposition = () => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          repositionAll();
+        });
+      });
+    };
+    window.addEventListener("load", () => {
+      pageLoaded = true;
+      doReposition();
+    }, { once: true });
+    setTimeout(() => {
+      if (!pageLoaded) {
+        doReposition();
+      }
+    }, 1e3);
+  })();
   chrome.runtime.sendMessage({ type: MSG.GET_SETTINGS }).then((res) => {
     if (res?.success && res.settings) {
       settings = { ...settings, ...res.settings };

@@ -15,7 +15,8 @@ import { MSG } from '../lib/messages.js';
 
 const BADGE = 'okey-badge';
 const PANEL = 'okey-panel';
-const tracked = new WeakSet();
+const tracked = new WeakMap(); // el → reposition fn
+const repositionRegistry = new Set(); // all active reposition fns for global reposition
 let panelEl = null;
 let settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
 let activeSessionCred = null;
@@ -166,11 +167,15 @@ function submitForm(anchorEl) {
   }
 }
 
+function repositionAll() {
+  repositionRegistry.forEach((fn) => { try { fn(); } catch (e) {} });
+}
+
 function attach(el) {
   if (tracked.has(el) || el.dataset.okeyIgnore) return;
   if (isButtonLike(el)) return;
   if (!isPasswordField(el) && !isUsernameField(el) && !isTotpField(el)) return;
-  tracked.add(el);
+  tracked.set(el, null); // placeholder; updated below
 
   // Prevent browser's native password/autofill manager popup from overlapping
   if (isPasswordField(el)) {
@@ -211,6 +216,10 @@ function attach(el) {
     }
   };
 
+  // Register in global registry so repositionAll() can reach this badge
+  tracked.set(el, reposition);
+  repositionRegistry.add(reposition);
+
   const show = () => { reposition(); };
   const hideSoon = () => setTimeout(() => { if (document.activeElement !== el && !badge.matches(':hover')) badge.style.display = 'none'; }, 150);
 
@@ -221,10 +230,17 @@ function attach(el) {
   window.addEventListener('resize', reposition);
 
   // ResizeObserver for reliable dynamic layout rendering in SPAs
-  const ro = new ResizeObserver(() => {
-    reposition();
-  });
+  const ro = new ResizeObserver(() => { reposition(); });
   ro.observe(el);
+
+  // Clean up from registry when the input is removed from DOM
+  const removalObserver = new MutationObserver(() => {
+    if (!document.contains(el)) {
+      repositionRegistry.delete(reposition);
+      removalObserver.disconnect();
+    }
+  });
+  removalObserver.observe(document, { childList: true, subtree: true });
 
   badge.addEventListener('mousedown', (e) => e.preventDefault());
   badge.addEventListener('click', async (e) => {
@@ -762,6 +778,46 @@ function bindContentActivityTracking() {
 scan();
 mo.observe(document.documentElement, { childList: true, subtree: true });
 bindContentActivityTracking();
+
+/**
+ * Smart reposition: two independent triggers to correct badge positions on slow pages.
+ *
+ * Trigger 1 — 1000ms timer: fires an intermediate reposition if the page hasn't
+ *   finished loading yet (covers inputs that were detected early but layout shifted).
+ *
+ * Trigger 2 — window `load`: ALWAYS repositions when the page fully loads,
+ *   regardless of whether the 1000ms timer already fired. This is the critical
+ *   case: input detected + timer fired at 1000ms, then page finishes at 1500ms —
+ *   we must reposition again at 1500ms to correct any final layout shift.
+ */
+(function initSmartReposition() {
+  // Already fully loaded — nothing to do
+  if (document.readyState === 'complete') return;
+
+  let pageLoaded = false;
+
+  const doReposition = () => {
+    // Two rAF frames so the browser has committed the layout paint before we read rect
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        repositionAll();
+      });
+    });
+  };
+
+  // Trigger 2: page fully loaded → ALWAYS reposition (even if timer already fired)
+  window.addEventListener('load', () => {
+    pageLoaded = true;
+    doReposition();
+  }, { once: true });
+
+  // Trigger 1: 1000ms fallback → only run if page hasn't finished loading yet
+  setTimeout(() => {
+    if (!pageLoaded) {
+      doReposition();
+    }
+  }, 1000);
+})();
 
 chrome.runtime.sendMessage({ type: MSG.GET_SETTINGS }).then((res) => {
   if (res?.success && res.settings) {

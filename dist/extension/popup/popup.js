@@ -20156,14 +20156,24 @@ function initialLetter(entry) {
   if (d) return d[0].toUpperCase();
   return "?";
 }
-function avatarEl(entry) {
-  const av = h("div", { class: "vs-avatar" }, initialLetter(entry));
-  if (settings.faviconsEnabled && entry.domain) {
+function avatarEl(entry, clickable = false) {
+  const hasDomain = !!entry.domain;
+  const av = h("div", {
+    class: "vs-avatar" + (clickable && hasDomain ? " vs-avatar-link" : ""),
+    title: clickable && hasDomain ? `Open ${entry.domain}` : void 0
+  }, initialLetter(entry));
+  if (settings.faviconsEnabled && hasDomain) {
     faviconFor(entry.domain).then((url) => {
       if (url) {
         clear(av);
         av.append(h("img", { src: url, alt: "", attrs: { loading: "lazy" } }));
       }
+    });
+  }
+  if (clickable && hasDomain) {
+    av.addEventListener("click", (e) => {
+      e.stopPropagation();
+      chrome.tabs.create({ url: `https://${entry.domain}` });
     });
   }
   return av;
@@ -20589,13 +20599,39 @@ function renderMain() {
   );
   const body = h("div", { class: "okey-body" });
   const footer = renderFooter();
-  const updateBanner = backendVersionMismatch ? h("div", { class: "okey-warn", style: "margin: 8px 12px; font-weight: 600;", text: "WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code." }) : null;
+  const updateBanner = buildVersionBanner();
   app.append(...[header, updateBanner, tabs, body, footer].filter(Boolean));
   search.addEventListener("input", () => renderList(body, search.value));
   renderList(body, "");
 }
 function tabLabel(t) {
   return { all: "All", password: "Logins", totp: "Auth", favorites: "\u2605" }[t];
+}
+function buildVersionBanner() {
+  if (!backendVersionMismatch) return null;
+  if (sessionStorage.getItem("okey_hide_version_banner")) return null;
+  const localVer = APP.VERSION;
+  const backendVer = APP.APPSCRIPT_VERSION;
+  const banner = h(
+    "div",
+    { class: "okey-version-banner" },
+    h("span", { class: "okey-banner-icon", text: "\u26A0" }),
+    h("span", { class: "okey-banner-msg", text: `Version mismatch \u2014 App v${localVer} \xB7 Backend v${backendVer}` }),
+    h("button", {
+      class: "okey-banner-close",
+      title: "Dismiss",
+      "aria-label": "Dismiss banner",
+      text: "\u2715",
+      onclick: (e) => {
+        e.stopPropagation();
+        sessionStorage.setItem("okey_hide_version_banner", "1");
+        banner.style.transition = "opacity 0.18s ease";
+        banner.style.opacity = "0";
+        setTimeout(() => banner.remove(), 200);
+      }
+    })
+  );
+  return banner;
 }
 function renderList(body, query) {
   clear(body);
@@ -20748,10 +20784,14 @@ function entryRow(entry, confidence) {
     const codeSpan = h("span", { class: "okey-row-totp-code vs-mono", text: "\u2022\u2022\u2022\u2022\u2022\u2022" });
     const progressBar = h("div", { class: "okey-row-totp-progress-bar" });
     const progressEl = h("div", { class: "okey-row-totp-progress" }, progressBar);
-    totpEl = h("div", { class: "okey-row-totp-container", attrs: { "data-secret": entry.totpSecret }, onclick: (ev) => {
-      ev.stopPropagation();
-      copyValue(codeSpan.textContent.replace(/\s/g, ""), "Code copied");
-    } }, codeSpan, progressEl);
+    totpEl = h("div", {
+      class: "okey-row-totp-container",
+      attrs: { "data-secret": entry.totpSecret },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        copyValue(codeSpan.textContent.replace(/\s/g, ""), "Code copied");
+      }
+    }, codeSpan, progressEl);
   }
   const row = h(
     "div",
@@ -20765,7 +20805,7 @@ function entryRow(entry, confidence) {
         selected.has(entry.id) ? selected.delete(entry.id) : selected.add(entry.id);
         renderMain();
       }
-    }) : avatarEl(entry),
+    }) : avatarEl(entry, true),
     h(
       "div",
       { class: "okey-entry-main" },
@@ -21259,17 +21299,21 @@ function renderSettings(scrollTop = 0) {
         "div",
         { class: "vs-row", style: "margin-top:8px" },
         h("button", { class: "vs-btn vs-btn-secondary vs-spacer", text: "Add vault sheet", onclick: () => addSheetModal(() => renderSettings()) }),
-        h("button", { class: "vs-btn vs-btn-primary", text: "Sync now", onclick: async (ev) => {
-          const b = ev.currentTarget;
-          b.disabled = true;
-          b.textContent = "Syncing...";
-          try {
-            await doManualSync();
-          } finally {
-            b.disabled = false;
-            b.textContent = "Sync now";
+        h("button", {
+          class: "vs-btn vs-btn-primary",
+          text: "Sync now",
+          onclick: async (ev) => {
+            const b = ev.currentTarget;
+            b.disabled = true;
+            b.textContent = "Syncing...";
+            try {
+              await doManualSync();
+            } finally {
+              b.disabled = false;
+              b.textContent = "Sync now";
+            }
           }
-        } })
+        })
       ),
       lastSyncLabel,
       healthWidget
@@ -21305,7 +21349,8 @@ function renderSettings(scrollTop = 0) {
   sync.getProfiles().then(renderProfiles).catch(console.error);
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((res) => {
     const lastSync = res[STORAGE_KEYS.LAST_SYNC_AT];
-    const ago = formatTimeAgo(lastSync);
+    const isNever = !lastSync || lastSync === "1970-01-01T00:00:00.000Z";
+    const ago = isNever ? "Never" : formatTimeAgo(lastSync);
     lastSyncLabel.textContent = ago === "Never" ? "Never synced" : `Last synced ${ago}`;
   }).catch(console.error);
   populateHealthWidget(healthWidget).catch(console.error);
@@ -21315,18 +21360,22 @@ function viewRecovery() {
   modal("Recovery key", [
     h("p", { class: "vs-muted", text: "Regenerate your 24-word recovery key. The old key will stop working." }),
     h("div", { class: "vs-field" }, pw),
-    h("button", { class: "vs-btn vs-btn-primary vs-btn-block", text: "Regenerate", onclick: async (ev) => {
-      try {
-        const probe = new Vault(local);
-        await probe.unlock(pw.value);
-        probe.lock();
-        const { recoveryMnemonic } = await vault.regenerateRecovery();
-        closeModal();
-        renderRecoveryReveal(recoveryMnemonic, renderSettings);
-      } catch {
-        toast("Incorrect master PIN", "error");
+    h("button", {
+      class: "vs-btn vs-btn-primary vs-btn-block",
+      text: "Regenerate",
+      onclick: async (ev) => {
+        try {
+          const probe = new Vault(local);
+          await probe.unlock(pw.value);
+          probe.lock();
+          const { recoveryMnemonic } = await vault.regenerateRecovery();
+          closeModal();
+          renderRecoveryReveal(recoveryMnemonic, renderSettings);
+        } catch {
+          toast("Incorrect master PIN", "error");
+        }
       }
-    } })
+    })
   ]);
 }
 function changeMasterPasswordModal() {
@@ -21392,49 +21441,61 @@ function addSheetModal(done) {
     h(
       "div",
       { class: "vs-row" },
-      h("button", { class: "vs-btn vs-btn-secondary vs-spacer", text: "Setup new sheet", onclick: async (ev) => {
-        const b = ev.currentTarget;
-        b.disabled = true;
-        b.textContent = "Setting up...";
-        try {
-          await sync.addProfile({ label: lbl.value || "My Vault", appsScriptUrl: url.value.trim() });
-          await sync.setupSheet();
-          toast("Sheet structure created", "success");
-          closeModal();
-          done();
-        } catch (e) {
-          toast(e.message, "error");
-          b.disabled = false;
-          b.textContent = "Setup new sheet";
+      h("button", {
+        class: "vs-btn vs-btn-secondary vs-spacer",
+        text: "Setup new sheet",
+        onclick: async (ev) => {
+          const b = ev.currentTarget;
+          b.disabled = true;
+          b.textContent = "Setting up...";
+          try {
+            await sync.addProfile({ label: lbl.value || "My Vault", appsScriptUrl: url.value.trim() });
+            await sync.setupSheet();
+            toast("Sheet structure created", "success");
+            closeModal();
+            done();
+          } catch (e) {
+            toast(e.message, "error");
+            b.disabled = false;
+            b.textContent = "Setup new sheet";
+          }
         }
-      } }),
-      h("button", { class: "vs-btn vs-btn-primary vs-spacer", text: "Save", onclick: async (ev) => {
-        const b = ev.currentTarget;
-        b.disabled = true;
-        b.textContent = "Saving...";
-        try {
-          await sync.addProfile({ label: lbl.value || "My Vault", appsScriptUrl: url.value.trim() });
-          toast("Vault added", "success");
-          closeModal();
-          done();
-        } catch (e) {
-          toast(e.message, "error");
-          b.disabled = false;
-          b.textContent = "Save";
+      }),
+      h("button", {
+        class: "vs-btn vs-btn-primary vs-spacer",
+        text: "Save",
+        onclick: async (ev) => {
+          const b = ev.currentTarget;
+          b.disabled = true;
+          b.textContent = "Saving...";
+          try {
+            await sync.addProfile({ label: lbl.value || "My Vault", appsScriptUrl: url.value.trim() });
+            toast("Vault added", "success");
+            closeModal();
+            done();
+          } catch (e) {
+            toast(e.message, "error");
+            b.disabled = false;
+            b.textContent = "Save";
+          }
         }
-      } })
+      })
     )
   ]);
 }
 function exportModal() {
   modal("Export vault", [
     h("div", { class: "okey-warn", style: "font-weight: 600;", text: "WARNING: This JSON file contains your real, unencrypted passwords. Store it securely and delete the file immediately after use." }),
-    h("button", { class: "vs-btn vs-btn-secondary vs-btn-block", style: "margin-bottom:8px", onclick: async () => {
-      const recs = await vault.exportRecords();
-      const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
-      download("okey-backup.json", exportOkeyBackup({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY], records: recs }));
-      closeModal();
-    } }, h("span", { html: ICONS.export }), "Encrypted OKey backup (.json)"),
+    h("button", {
+      class: "vs-btn vs-btn-secondary vs-btn-block",
+      style: "margin-bottom:8px",
+      onclick: async () => {
+        const recs = await vault.exportRecords();
+        const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
+        download("okey-backup.json", exportOkeyBackup({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY], records: recs }));
+        closeModal();
+      }
+    }, h("span", { html: ICONS.export }), "Encrypted OKey backup (.json)"),
     h("button", { class: "vs-btn vs-btn-secondary vs-btn-block", style: "margin-bottom:8px", onclick: () => {
       download("okey-export.json", exportBitwardenJson(vault.getEntries()));
       closeModal();
@@ -21459,29 +21520,32 @@ function importModal() {
   modal("Import", [
     h("div", { class: "vs-field" }, label("Format"), fmt),
     h("div", { class: "vs-field" }, file),
-    h("button", { class: "vs-btn vs-btn-primary vs-btn-block", onclick: async () => {
-      const f = file.files[0];
-      if (!f) return toast("Choose a file", "error");
-      const text = await f.text();
-      try {
-        const parser = { chrome: importChrome, bitwarden: importBitwarden, lastpass: importLastPass, zoho: importZohoVault, otp: importOtpAuthUris }[fmt.value];
-        const items = parser(text);
-        let n = 0;
-        for (const it of items) {
-          try {
-            await vault.addEntry(it);
-            n++;
-          } catch {
+    h("button", {
+      class: "vs-btn vs-btn-primary vs-btn-block",
+      onclick: async () => {
+        const f = file.files[0];
+        if (!f) return toast("Choose a file", "error");
+        const text = await f.text();
+        try {
+          const parser = { chrome: importChrome, bitwarden: importBitwarden, lastpass: importLastPass, zoho: importZohoVault, otp: importOtpAuthUris }[fmt.value];
+          const items = parser(text);
+          let n = 0;
+          for (const it of items) {
+            try {
+              await vault.addEntry(it);
+              n++;
+            } catch {
+            }
           }
+          toast(`Imported ${n} item${n === 1 ? "" : "s"}`, "success");
+          closeModal();
+          scheduleSync();
+          renderMain();
+        } catch (e) {
+          toast(`Import failed: ${e.message}`, "error");
         }
-        toast(`Imported ${n} item${n === 1 ? "" : "s"}`, "success");
-        closeModal();
-        scheduleSync();
-        renderMain();
-      } catch (e) {
-        toast(`Import failed: ${e.message}`, "error");
       }
-    } }, h("span", { html: ICONS.import }), "Import")
+    }, h("span", { html: ICONS.import }), "Import")
   ]);
 }
 function modal(title, children) {
@@ -21625,7 +21689,8 @@ function renderFooter() {
   refreshBtn.classList.add("okey-footer-sync-btn");
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {
     const lastSync = s[STORAGE_KEYS.LAST_SYNC_AT];
-    const ago = formatTimeAgo(lastSync);
+    const isNever = !lastSync || lastSync === "1970-01-01T00:00:00.000Z";
+    const ago = isNever ? "Never" : formatTimeAgo(lastSync);
     syncLabel.textContent = ago === "Never" ? "Never synced" : `Last synced: ${ago}`;
   });
   return h(
@@ -21863,7 +21928,10 @@ async function renderDashboard() {
       }) : null
     )
   );
-  const lastSyncText = data?.lastSync ? formatTimeAgo(data.lastSync) : "Never";
+  const localSyncData = await local.get(STORAGE_KEYS.LAST_SYNC_AT);
+  const localLastSync = localSyncData[STORAGE_KEYS.LAST_SYNC_AT];
+  const isNeverSynced = !localLastSync || localLastSync === "1970-01-01T00:00:00.000Z";
+  const lastSyncText = isNeverSynced ? "Never" : formatTimeAgo(localLastSync);
   const syncInfoCard = h(
     "div",
     {
@@ -21877,7 +21945,7 @@ async function renderDashboard() {
       h(
         "div",
         { style: "display:flex; justify-content:space-between;" },
-        h("span", { class: "vs-faint", text: "Un-synced changes queue:" }),
+        h("span", { class: "vs-faint", text: "Un-synced changes:" }),
         h("span", {
           style: `font-weight:600; color:${offlineQueue.length > 0 ? "var(--vs-warning, #f59e0b)" : "inherit"};`,
           text: `${offlineQueue.length} batch(es)`
@@ -21886,13 +21954,13 @@ async function renderDashboard() {
       h(
         "div",
         { style: "display:flex; justify-content:space-between;" },
-        h("span", { class: "vs-faint", text: "Last Sync Timestamp:" }),
+        h("span", { class: "vs-faint", text: "Last Sync (this device):" }),
         h("span", { style: "font-weight:500;", text: lastSyncText })
       ),
       h(
         "div",
         { style: "display:flex; justify-content:space-between;" },
-        h("span", { class: "vs-faint", text: "Spreadsheet Database Size:" }),
+        h("span", { class: "vs-faint", text: "Spreadsheet DB Size:" }),
         h("span", { style: "font-weight:500;", text: connected ? `${health?.vaultEntries ?? 0} entries` : "Offline" })
       ),
       h(

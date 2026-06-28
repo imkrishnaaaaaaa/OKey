@@ -83,7 +83,7 @@ async function loadStartupData() {
     if (remoteSettings) {
       settings = { ...settings, ...remoteSettings };
       await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-      await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+      await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => { });
       if (typeof applyTheme === 'function') applyTheme(settings.theme);
     }
     if (health) {
@@ -183,7 +183,7 @@ function toast(message, type = 'info') {
 async function copyValue(text, label = 'Copied') {
   try {
     await navigator.clipboard.writeText(text);
-    chrome.runtime.sendMessage({ type: MSG.COPY_TO_CLIPBOARD }).catch(() => {});
+    chrome.runtime.sendMessage({ type: MSG.COPY_TO_CLIPBOARD }).catch(() => { });
     toast(`${label} · clears in ${settings.clipboardClearTimeout}s`, 'success');
   } catch {
     toast('Copy failed', 'error');
@@ -224,11 +224,21 @@ function initialLetter(entry) {
   return '?';
 }
 
-function avatarEl(entry) {
-  const av = h('div', { class: 'vs-avatar' }, initialLetter(entry));
-  if (settings.faviconsEnabled && entry.domain) {
+function avatarEl(entry, clickable = false) {
+  const hasDomain = !!entry.domain;
+  const av = h('div', {
+    class: 'vs-avatar' + (clickable && hasDomain ? ' vs-avatar-link' : ''),
+    title: clickable && hasDomain ? `Open ${entry.domain}` : undefined,
+  }, initialLetter(entry));
+  if (settings.faviconsEnabled && hasDomain) {
     faviconFor(entry.domain).then((url) => {
       if (url) { clear(av); av.append(h('img', { src: url, alt: '', attrs: { loading: 'lazy' } })); }
+    });
+  }
+  if (clickable && hasDomain) {
+    av.addEventListener('click', (e) => {
+      e.stopPropagation();
+      chrome.tabs.create({ url: `https://${entry.domain}` });
     });
   }
   return av;
@@ -261,7 +271,7 @@ function bindActivityTracking() {
     const now = Date.now();
     if (now - lastActivityTouch < 5000) return;
     lastActivityTouch = now;
-    touchSession(settings.autoLockTimeout).catch(() => {});
+    touchSession(settings.autoLockTimeout).catch(() => { });
   };
   ['pointerdown', 'keydown', 'input', 'scroll'].forEach((eventName) => {
     window.addEventListener(eventName, markActive, true);
@@ -333,7 +343,7 @@ function renderCreateVaultSetup() {
   const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Create 4-digit master PIN', autofocus: true });
   const pw2 = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Confirm 4-digit master PIN' });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Create vault' });
-  
+
   pw.addEventListener('input', () => { if (pw.value.length === 4) pw2.focus(); });
   pw2.addEventListener('input', () => { if (pw2.value.length === 4 && pw.value === pw2.value) btn.click(); });
 
@@ -369,9 +379,9 @@ function renderRestoreFromSheet() {
   const url = h('input', { class: 'vs-input', type: 'text', placeholder: 'Apps Script URL' });
   const pw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Master PIN' });
   const btn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Connect & Restore' });
-  
+
   pw.addEventListener('input', () => { if (pw.value.length === 4) btn.click(); });
-  
+
   btn.addEventListener('click', async () => {
     if (!url.value || !pw.value) return toast('Fill all fields', 'error');
     btn.disabled = true; btn.textContent = 'Connecting...';
@@ -379,10 +389,10 @@ function renderRestoreFromSheet() {
       const trimmedUrl = url.value.trim();
       const meta = await sync.fetchMetadata(trimmedUrl);
       if (!meta || !meta.salt) throw new Error('No vault data found on this sheet.');
-      
+
       const profile = await sync.addProfile({ label: 'Restored Vault', appsScriptUrl: trimmedUrl });
       const remoteData = await sync.pullVault();
-      
+
       await vault.restoreFromRemote(pw.value, remoteData.metadata, remoteData.entries);
 
       // Pull and apply settings from sheet
@@ -390,7 +400,7 @@ function renderRestoreFromSheet() {
       if (remoteSettings) {
         settings = { ...settings, ...remoteSettings };
         await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => { });
         if (typeof applyTheme === 'function') applyTheme(settings.theme);
       }
 
@@ -401,7 +411,7 @@ function renderRestoreFromSheet() {
       const profiles = await sync.getProfiles();
       const p = profiles.find(x => x.appsScriptUrl === url.value.trim());
       if (p) await sync.removeProfile(p.id);
-      
+
       btn.disabled = false; btn.textContent = 'Connect & Restore';
       toast(e.message, 'error');
     }
@@ -628,15 +638,15 @@ function renderMain() {
 
   const tabs = h('div', { class: 'okey-tabs' },
     ...tabsList.map((t) =>
-      h('button', { class: 'okey-tab', 'aria-selected': String(view.tab === t),
-        onclick: () => { view.tab = t; renderMain(); }, text: tabLabel(t) || t })));
+      h('button', {
+        class: 'okey-tab', 'aria-selected': String(view.tab === t),
+        onclick: () => { view.tab = t; renderMain(); }, text: tabLabel(t) || t
+      })));
 
   const body = h('div', { class: 'okey-body' });
   const footer = renderFooter();
 
-  const updateBanner = backendVersionMismatch
-    ? h('div', { class: 'okey-warn', style: 'margin: 8px 12px; font-weight: 600;', text: 'WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code.' })
-    : null;
+  const updateBanner = buildVersionBanner();
 
   app.append(...[header, updateBanner, tabs, body, footer].filter(Boolean));
   search.addEventListener('input', () => renderList(body, search.value));
@@ -644,6 +654,27 @@ function renderMain() {
 }
 
 function tabLabel(t) { return { all: 'All', password: 'Logins', totp: 'Auth', favorites: '★' }[t]; }
+
+function buildVersionBanner() {
+  if (!backendVersionMismatch) return null;
+  if (sessionStorage.getItem('okey_hide_version_banner')) return null;
+  const localVer = APP.VERSION;
+  const backendVer = APP.APPSCRIPT_VERSION;
+  const banner = h('div', { class: 'okey-version-banner' },
+    h('span', { class: 'okey-banner-icon', text: '⚠' }),
+    h('span', { class: 'okey-banner-msg', text: `Version mismatch — App v${localVer} · Backend v${backendVer}` }),
+    h('button', {
+      class: 'okey-banner-close', title: 'Dismiss', 'aria-label': 'Dismiss banner', text: '✕', onclick: (e) => {
+        e.stopPropagation();
+        sessionStorage.setItem('okey_hide_version_banner', '1');
+        banner.style.transition = 'opacity 0.18s ease';
+        banner.style.opacity = '0';
+        setTimeout(() => banner.remove(), 200);
+      }
+    })
+  );
+  return banner;
+}
 
 function renderList(body, query) {
   clear(body);
@@ -691,25 +722,31 @@ function renderList(body, query) {
 }
 
 function selectToolbar(body, query) {
-  const toggle = h('button', { class: 'vs-btn vs-btn-ghost vs-btn-sm', text: selectMode ? 'Done' : 'Select',
-    onclick: () => { selectMode = !selectMode; selected.clear(); renderList(body, query); } });
+  const toggle = h('button', {
+    class: 'vs-btn vs-btn-ghost vs-btn-sm', text: selectMode ? 'Done' : 'Select',
+    onclick: () => { selectMode = !selectMode; selected.clear(); renderList(body, query); }
+  });
   const row = h('div', { class: 'vs-row', style: 'padding:2px 4px' }, h('div', { class: 'vs-spacer' }), toggle);
   if (selectMode) {
-    const del = h('button', { class: 'vs-btn vs-btn-danger vs-btn-sm', text: `Delete (${selected.size})`, disabled: !selected.size,
+    const del = h('button', {
+      class: 'vs-btn vs-btn-danger vs-btn-sm', text: `Delete (${selected.size})`, disabled: !selected.size,
       onclick: async () => {
         if (confirm(`Are you sure you want to delete ${selected.size} selected item${selected.size === 1 ? '' : 's'}? This cannot be undone.`)) {
           await vault.deleteEntries([...selected]);
           selectMode = false; selected.clear();
           toast('Deleted', 'success'); renderList(body, query); scheduleSync();
         }
-      } });
-    const exp = h('button', { class: 'vs-btn vs-btn-secondary vs-btn-sm', text: `Export (${selected.size})`, disabled: !selected.size,
+      }
+    });
+    const exp = h('button', {
+      class: 'vs-btn vs-btn-secondary vs-btn-sm', text: `Export (${selected.size})`, disabled: !selected.size,
       onclick: () => {
         const selectedEntries = [...selected].map(id => vault.getEntry(id)).filter(Boolean);
         download('okey-selected-export.csv', IE.exportCsv(selectedEntries));
         selectMode = false; selected.clear();
         toast('Exported CSV', 'success'); renderList(body, query);
-      } });
+      }
+    });
     row.insertBefore(del, row.firstChild);
     row.insertBefore(exp, del.nextSibling);
   }
@@ -782,15 +819,19 @@ function entryRow(entry, confidence) {
     const codeSpan = h('span', { class: 'okey-row-totp-code vs-mono', text: '••••••' });
     const progressBar = h('div', { class: 'okey-row-totp-progress-bar' });
     const progressEl = h('div', { class: 'okey-row-totp-progress' }, progressBar);
-    totpEl = h('div', { class: 'okey-row-totp-container', attrs: { 'data-secret': entry.totpSecret }, onclick: (ev) => {
-      ev.stopPropagation();
-      copyValue(codeSpan.textContent.replace(/\s/g, ''), 'Code copied');
-    } }, codeSpan, progressEl);
+    totpEl = h('div', {
+      class: 'okey-row-totp-container', attrs: { 'data-secret': entry.totpSecret }, onclick: (ev) => {
+        ev.stopPropagation();
+        copyValue(codeSpan.textContent.replace(/\s/g, ''), 'Code copied');
+      }
+    }, codeSpan, progressEl);
   }
 
   const row = h('div', { class: 'okey-entry' },
-    selectMode ? h('input', { type: 'checkbox', class: 'okey-checkbox', checked: selected.has(entry.id),
-      onclick: (ev) => { ev.stopPropagation(); selected.has(entry.id) ? selected.delete(entry.id) : selected.add(entry.id); renderMain(); } }) : avatarEl(entry),
+    selectMode ? h('input', {
+      type: 'checkbox', class: 'okey-checkbox', checked: selected.has(entry.id),
+      onclick: (ev) => { ev.stopPropagation(); selected.has(entry.id) ? selected.delete(entry.id) : selected.add(entry.id); renderMain(); }
+    }) : avatarEl(entry, true),
     h('div', { class: 'okey-entry-main' },
       h('div', { class: 'okey-entry-title' }, entry.nickname || entry.siteName || getDisplayDomain(entry.domain) || 'Untitled'),
       h('div', { class: 'okey-entry-sub' }, sub)),
@@ -820,8 +861,10 @@ function renderDetail(id) {
   if (entry.notes) fields.append(detailField('Notes', entry.notes, false));
   (entry.customFields || []).forEach((f) => fields.append(detailField(f.label, f.value, true)));
   if (entry.tags?.length) fields.append(detailField('Tags', entry.tags.join(', '), false));
-  fields.append(h('div', { class: 'vs-faint', style: 'font-size:11px;margin-top:10px',
-    text: `Updated ${formatTimeAgo(entry.updatedAt)} · used ${formatTimeAgo(entry.lastUsedAt)}` }));
+  fields.append(h('div', {
+    class: 'vs-faint', style: 'font-size:11px;margin-top:10px',
+    text: `Updated ${formatTimeAgo(entry.updatedAt)} · used ${formatTimeAgo(entry.lastUsedAt)}`
+  }));
 
   const star = iconBtn(ICONS.star, entry.isFavorite ? 'Unfavorite' : 'Favorite', async () => {
     await vault.updateEntry(id, { isFavorite: !entry.isFavorite }); toast(entry.isFavorite ? 'Removed favorite' : 'Favorited', 'success'); renderDetail(id); scheduleSync();
@@ -984,7 +1027,8 @@ function renderEdit(id, draft = null, scrollTop = 0) {
       displayOrder: Number(f.displayOrder.value) || 0,
       folder: chosenFolder,
       customFields: [...customWrap.querySelectorAll('.okey-custom-row')].map((r) => ({
-        label: r.children[0].value.trim(), value: r.children[1].value, hidden: false })).filter((c) => c.label),
+        label: r.children[0].value.trim(), value: r.children[1].value, hidden: false
+      })).filter((c) => c.label),
       entryType: f.totp.value.trim() && !pwInput.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD,
     };
     if (!data.siteName && !data.domain) return toast('Add a site name or domain', 'error');
@@ -1176,11 +1220,13 @@ function renderSettings(scrollTop = 0) {
       profileList,
       h('div', { class: 'vs-row', style: 'margin-top:8px' },
         h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Add vault sheet', onclick: () => addSheetModal(() => renderSettings()) }),
-        h('button', { class: 'vs-btn vs-btn-primary', text: 'Sync now', onclick: async (ev) => {
-          const b = ev.currentTarget;
-          b.disabled = true; b.textContent = 'Syncing...';
-          try { await doManualSync(); } finally { b.disabled = false; b.textContent = 'Sync now'; }
-        } })),
+        h('button', {
+          class: 'vs-btn vs-btn-primary', text: 'Sync now', onclick: async (ev) => {
+            const b = ev.currentTarget;
+            b.disabled = true; b.textContent = 'Syncing...';
+            try { await doManualSync(); } finally { b.disabled = false; b.textContent = 'Sync now'; }
+          }
+        })),
       lastSyncLabel,
       healthWidget),
 
@@ -1207,7 +1253,8 @@ function renderSettings(scrollTop = 0) {
   sync.getProfiles().then(renderProfiles).catch(console.error);
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((res) => {
     const lastSync = res[STORAGE_KEYS.LAST_SYNC_AT];
-    const ago = formatTimeAgo(lastSync);
+    const isNever = !lastSync || lastSync === '1970-01-01T00:00:00.000Z';
+    const ago = isNever ? 'Never' : formatTimeAgo(lastSync);
     lastSyncLabel.textContent = ago === 'Never' ? 'Never synced' : `Last synced ${ago}`;
   }).catch(console.error);
 
@@ -1219,17 +1266,19 @@ function viewRecovery() {
   modal('Recovery key', [
     h('p', { class: 'vs-muted', text: 'Regenerate your 24-word recovery key. The old key will stop working.' }),
     h('div', { class: 'vs-field' }, pw),
-    h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Regenerate', onclick: async (ev) => {
-      try {
-        // Verify password by re-deriving (rekey not needed): unlock check via changeMasterPassword to same? Instead verify by re-unlock.
-        const probe = new Vault(local);
-        await probe.unlock(pw.value);
-        probe.lock();
-        const { recoveryMnemonic } = await vault.regenerateRecovery();
-        closeModal();
-        renderRecoveryReveal(recoveryMnemonic, renderSettings);
-      } catch { toast('Incorrect master PIN', 'error'); }
-    } }),
+    h('button', {
+      class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Regenerate', onclick: async (ev) => {
+        try {
+          // Verify password by re-deriving (rekey not needed): unlock check via changeMasterPassword to same? Instead verify by re-unlock.
+          const probe = new Vault(local);
+          await probe.unlock(pw.value);
+          probe.lock();
+          const { recoveryMnemonic } = await vault.regenerateRecovery();
+          closeModal();
+          renderRecoveryReveal(recoveryMnemonic, renderSettings);
+        } catch { toast('Incorrect master PIN', 'error'); }
+      }
+    }),
   ]);
 }
 
@@ -1238,7 +1287,7 @@ function changeMasterPasswordModal() {
   const newPw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'New master PIN' });
   const confirmNewPw = h('input', { class: 'vs-input', type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 4, placeholder: 'Confirm new master PIN' });
   const meter = strengthMeter();
-  
+
   currentPw.addEventListener('input', () => { if (currentPw.value.length === 4) newPw.focus(); });
   newPw.addEventListener('input', () => {
     meter.update(newPw.value);
@@ -1247,7 +1296,7 @@ function changeMasterPasswordModal() {
   confirmNewPw.addEventListener('input', () => {
     if (confirmNewPw.value.length === 4 && newPw.value === confirmNewPw.value) submitBtn.click();
   });
-  
+
   const submitBtn = h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', text: 'Change PIN' });
 
   submitBtn.addEventListener('click', async () => {
@@ -1271,7 +1320,7 @@ function changeMasterPasswordModal() {
 
       if (await sync.getActiveProfile()) {
         const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
-        await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] }).catch(() => {});
+        await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] }).catch(() => { });
       }
 
       toast('Master PIN changed successfully', 'success');
@@ -1303,30 +1352,36 @@ function addSheetModal(done) {
     h('div', { class: 'vs-field' }, url),
     h('p', { class: 'vs-faint', text: 'Deploy the OKey Apps Script as a Web App and paste its /exec URL. See SETUP.md.' }),
     h('div', { class: 'vs-row' },
-      h('button', { class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Setup new sheet', onclick: async (ev) => {
-        const b = ev.currentTarget;
-        b.disabled = true; b.textContent = 'Setting up...';
-        try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); await sync.setupSheet(); toast('Sheet structure created', 'success'); closeModal(); done(); }
-        catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Setup new sheet'; }
-      } }),
-      h('button', { class: 'vs-btn vs-btn-primary vs-spacer', text: 'Save', onclick: async (ev) => {
-        const b = ev.currentTarget;
-        b.disabled = true; b.textContent = 'Saving...';
-        try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); toast('Vault added', 'success'); closeModal(); done(); }
-        catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Save'; }
-      } })),
+      h('button', {
+        class: 'vs-btn vs-btn-secondary vs-spacer', text: 'Setup new sheet', onclick: async (ev) => {
+          const b = ev.currentTarget;
+          b.disabled = true; b.textContent = 'Setting up...';
+          try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); await sync.setupSheet(); toast('Sheet structure created', 'success'); closeModal(); done(); }
+          catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Setup new sheet'; }
+        }
+      }),
+      h('button', {
+        class: 'vs-btn vs-btn-primary vs-spacer', text: 'Save', onclick: async (ev) => {
+          const b = ev.currentTarget;
+          b.disabled = true; b.textContent = 'Saving...';
+          try { await sync.addProfile({ label: lbl.value || 'My Vault', appsScriptUrl: url.value.trim() }); toast('Vault added', 'success'); closeModal(); done(); }
+          catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Save'; }
+        }
+      })),
   ]);
 }
 
 function exportModal() {
   modal('Export vault', [
     h('div', { class: 'okey-warn', style: 'font-weight: 600;', text: 'WARNING: This JSON file contains your real, unencrypted passwords. Store it securely and delete the file immediately after use.' }),
-    h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-bottom:8px', onclick: async () => {
-      const recs = await vault.exportRecords();
-      const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
-      download('okey-backup.json', IE.exportOkeyBackup({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY], records: recs }));
-      closeModal();
-    } }, h('span', { html: ICONS.export }), 'Encrypted OKey backup (.json)'),
+    h('button', {
+      class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-bottom:8px', onclick: async () => {
+        const recs = await vault.exportRecords();
+        const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
+        download('okey-backup.json', IE.exportOkeyBackup({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY], records: recs }));
+        closeModal();
+      }
+    }, h('span', { html: ICONS.export }), 'Encrypted OKey backup (.json)'),
     h('button', { class: 'vs-btn vs-btn-secondary vs-btn-block', style: 'margin-bottom:8px', onclick: () => { download('okey-export.json', IE.exportBitwardenJson(vault.getEntries())); closeModal(); } }, h('span', { html: ICONS.export }), 'Plaintext JSON (Bitwarden)'),
     h('button', { class: 'vs-btn vs-btn-ghost vs-btn-block', onclick: () => { download('okey-export.csv', IE.exportCsv(vault.getEntries())); closeModal(); } }, h('span', { html: ICONS.export }), 'Plaintext CSV'),
   ]);
@@ -1341,16 +1396,18 @@ function importModal() {
   modal('Import', [
     h('div', { class: 'vs-field' }, label('Format'), fmt),
     h('div', { class: 'vs-field' }, file),
-    h('button', { class: 'vs-btn vs-btn-primary vs-btn-block', onclick: async () => {
-      const f = file.files[0]; if (!f) return toast('Choose a file', 'error');
-      const text = await f.text();
-      try {
-        const parser = { chrome: IE.importChrome, bitwarden: IE.importBitwarden, lastpass: IE.importLastPass, zoho: IE.importZohoVault, otp: IE.importOtpAuthUris }[fmt.value];
-        const items = parser(text);
-        let n = 0; for (const it of items) { try { await vault.addEntry(it); n++; } catch { /* skip invalid */ } }
-        toast(`Imported ${n} item${n === 1 ? '' : 's'}`, 'success'); closeModal(); scheduleSync(); renderMain();
-      } catch (e) { toast(`Import failed: ${e.message}`, 'error'); }
-    } }, h('span', { html: ICONS.import }), 'Import'),
+    h('button', {
+      class: 'vs-btn vs-btn-primary vs-btn-block', onclick: async () => {
+        const f = file.files[0]; if (!f) return toast('Choose a file', 'error');
+        const text = await f.text();
+        try {
+          const parser = { chrome: IE.importChrome, bitwarden: IE.importBitwarden, lastpass: IE.importLastPass, zoho: IE.importZohoVault, otp: IE.importOtpAuthUris }[fmt.value];
+          const items = parser(text);
+          let n = 0; for (const it of items) { try { await vault.addEntry(it); n++; } catch { /* skip invalid */ } }
+          toast(`Imported ${n} item${n === 1 ? '' : 's'}`, 'success'); closeModal(); scheduleSync(); renderMain();
+        } catch (e) { toast(`Import failed: ${e.message}`, 'error'); }
+      }
+    }, h('span', { html: ICONS.import }), 'Import'),
   ]);
 }
 
@@ -1371,7 +1428,7 @@ async function doManualSync() {
   try {
     const remoteMeta = await sync.fetchMetadata();
     const c = await local.get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
-    
+
     if (remoteMeta && remoteMeta.salt) {
       if (remoteMeta.salt !== c[STORAGE_KEYS.VAULT_SALT]) {
         updateSyncUI('err');
@@ -1381,22 +1438,22 @@ async function doManualSync() {
       await sync.pushKeyMaterial({ salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS], wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] });
     }
 
-    await sync.pushSettings(settings).catch(() => {});
+    await sync.pushSettings(settings).catch(() => { });
     const r = await sync.sync(vault);
-    
+
     // Pull settings and health check after manual sync
     try {
       const remote = await sync.pullSettings();
       if (remote) {
         settings = { ...settings, ...remote };
         await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+        await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => { });
         if (typeof applyTheme === 'function') applyTheme(settings.theme);
       }
     } catch (e) {
       console.error("Failed to pull settings after sync:", e);
     }
-    
+
     try {
       const health = await sync._call('health');
       if (health) {
@@ -1408,8 +1465,8 @@ async function doManualSync() {
 
     // Sync Cache Invalidation
     await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
-    await sync.getFolders(true).catch(() => {});
-    await refreshDashboardAfterSync().catch(() => {});
+    await sync.getFolders(true).catch(() => { });
+    await refreshDashboardAfterSync().catch(() => { });
     toast(`Synced · ↑${r.pushed} ↓${r.pulled} (${vault.getEntries().length})`, 'success');
     updateSyncUI('ok');
     renderMain();
@@ -1440,24 +1497,24 @@ async function maybeSyncOnUnlock() {
       .then(async () => {
         updateSyncUI('ok');
         await local.remove([STORAGE_KEYS.CACHED_FOLDERS, STORAGE_KEYS.FOLDERS_CACHE_TIME]);
-        await sync.getFolders(true).catch(() => {});
-        await refreshDashboardAfterSync().catch(() => {});
+        await sync.getFolders(true).catch(() => { });
+        await refreshDashboardAfterSync().catch(() => { });
 
         // Pull settings and health check asynchronously
         sync.pullSettings().then(async (remote) => {
           if (remote) {
             settings = { ...settings, ...remote };
             await local.set({ [STORAGE_KEYS.SETTINGS]: settings });
-            await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => {});
+            await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings }).catch(() => { });
             if (typeof applyTheme === 'function') applyTheme(settings.theme);
           }
-        }).catch(() => {});
+        }).catch(() => { });
 
         sync._call('health').then(async (health) => {
           if (health) {
             await local.set({ 'okey_backend_health': health });
           }
-        }).catch(() => {});
+        }).catch(() => { });
       })
       .catch(() => updateSyncUI('err'));
   }
@@ -1465,8 +1522,8 @@ async function maybeSyncOnUnlock() {
 
 async function updateSettings(patch) {
   settings = { ...settings, ...patch };
-  await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings: patch }).catch(() => {});
-  if (await sync.getActiveProfile()) sync.pushSettings(settings).catch(() => {}); // feedback #14
+  await chrome.runtime.sendMessage({ type: MSG.UPDATE_SETTINGS, settings: patch }).catch(() => { });
+  if (await sync.getActiveProfile()) sync.pushSettings(settings).catch(() => { }); // feedback #14
 }
 
 // ---------- small UI atoms ----------
@@ -1489,7 +1546,8 @@ function renderFooter() {
 
   local.get(STORAGE_KEYS.LAST_SYNC_AT).then((s) => {
     const lastSync = s[STORAGE_KEYS.LAST_SYNC_AT];
-    const ago = formatTimeAgo(lastSync);
+    const isNever = !lastSync || lastSync === '1970-01-01T00:00:00.000Z';
+    const ago = isNever ? 'Never' : formatTimeAgo(lastSync);
     syncLabel.textContent = ago === 'Never' ? 'Never synced' : `Last synced: ${ago}`;
   });
   return h('div', { class: 'okey-footer vs-glass' },
@@ -1558,7 +1616,7 @@ function renderMainMenu(ev) {
     h('button', { class: 'okey-menu-item', text: 'Analytics', onclick: () => { closeModal(); renderAnalytics(); } }),
     h('button', { class: 'okey-menu-item', text: 'Settings', onclick: () => { closeModal(); renderSettings(); } })
   );
-  
+
   const rect = ev.currentTarget.getBoundingClientRect();
   menu.style.position = 'absolute';
   menu.style.top = `${rect.bottom + 8}px`;
@@ -1575,7 +1633,7 @@ async function renderDashboard() {
   view.entryId = null;
   rememberView();
   clear(app);
-  
+
   const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading dashboard...' });
   app.append(h('div', { class: 'okey-view' },
     viewHeader('Dashboard', renderMain),
@@ -1612,24 +1670,24 @@ async function renderDashboard() {
   clear(content);
 
   const profile = await sync.getActiveProfile();
-  const fallbackUrl = profile?.sheetId 
-    ? `https://docs.google.com/spreadsheets/d/${profile.sheetId}/edit` 
+  const fallbackUrl = profile?.sheetId
+    ? `https://docs.google.com/spreadsheets/d/${profile.sheetId}/edit`
     : (profile?.appsScriptUrl || '');
 
   // Connection badge & details container
-  const statusBadge = h('div', { 
-    class: 'vs-glass', 
-    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);' 
+  const statusBadge = h('div', {
+    class: 'vs-glass',
+    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);'
   },
     h('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;' },
       h('span', { style: 'font-weight:600; font-size:13px;' }, 'Vault Status'),
       h('div', { style: 'display:flex; align-items:center; gap:6px;' },
-        h('span', { 
-          style: `width:8px; height:8px; border-radius:50%; background:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'}; display:inline-block; animation: vs-pulse 1.5s infinite;` 
+        h('span', {
+          style: `width:8px; height:8px; border-radius:50%; background:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'}; display:inline-block; animation: vs-pulse 1.5s infinite;`
         }),
-        h('span', { 
-          style: `font-size:11px; font-weight:700; color:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'};`, 
-          text: connected ? 'ONLINE' : 'OFFLINE' 
+        h('span', {
+          style: `font-size:11px; font-weight:700; color:${connected ? 'var(--vs-success)' : 'var(--vs-danger, #ef4444)'};`,
+          text: connected ? 'ONLINE' : 'OFFLINE'
         })
       )
     ),
@@ -1641,12 +1699,12 @@ async function renderDashboard() {
       h('div', { style: 'display:flex; justify-content:space-between; align-items:center;' },
         h('span', { class: 'vs-faint', text: 'Spreadsheet:' }),
         (connected && health?.sheetUrl) || fallbackUrl
-          ? h('a', { 
-              href: health?.sheetUrl || fallbackUrl, 
-              target: '_blank', 
-              style: 'color:var(--vs-brand); text-decoration:none; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block;', 
-              text: 'Open Spreadsheet ↗' 
-            })
+          ? h('a', {
+            href: health?.sheetUrl || fallbackUrl,
+            target: '_blank',
+            style: 'color:var(--vs-brand); text-decoration:none; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block;',
+            text: 'Open Spreadsheet ↗'
+          })
           : h('span', { class: 'vs-faint', text: 'N/A' })
       )
     )
@@ -1658,9 +1716,9 @@ async function renderDashboard() {
   const actualBackendVer = health?.version || (connected ? '1.0.0' : 'Unknown');
   const isMismatch = connected && actualBackendVer !== targetBackendVer;
 
-  const versionCard = h('div', { 
-    class: 'vs-glass', 
-    style: `padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid ${isMismatch ? 'var(--vs-danger, #ef4444)' : 'var(--vs-border)'};` 
+  const versionCard = h('div', {
+    class: 'vs-glass',
+    style: `padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid ${isMismatch ? 'var(--vs-danger, #ef4444)' : 'var(--vs-border)'};`
   },
     h('div', { style: 'font-weight:600; font-size:12px; margin-bottom:8px;', text: 'Version Alignment' }),
     h('div', { style: 'font-size:11px; display:flex; flex-direction:column; gap:4px;' },
@@ -1670,39 +1728,43 @@ async function renderDashboard() {
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },
         h('span', { class: 'vs-faint', text: 'Apps Script Backend:' }),
-        h('span', { 
-          style: `font-weight:500; color:${isMismatch ? 'var(--vs-danger, #ef4444)' : 'inherit'};`, 
-          text: connected ? `v${actualBackendVer}` : 'Offline' 
+        h('span', {
+          style: `font-weight:500; color:${isMismatch ? 'var(--vs-danger, #ef4444)' : 'inherit'};`,
+          text: connected ? `v${actualBackendVer}` : 'Offline'
         })
       ),
-      isMismatch ? h('div', { 
-        style: 'color:var(--vs-danger, #ef4444); font-size:10px; margin-top:6px; font-weight:600; text-align:center;', 
-        text: `⚠️ Version Mismatch! Expected backend v${targetBackendVer}. Please redeploy Apps Script.` 
+      isMismatch ? h('div', {
+        style: 'color:var(--vs-danger, #ef4444); font-size:10px; margin-top:6px; font-weight:600; text-align:center;',
+        text: `⚠️ Version Mismatch! Expected backend v${targetBackendVer}. Please redeploy Apps Script.`
       }) : null
     )
   );
 
-  // Sync delta information card
-  const lastSyncText = data?.lastSync ? formatTimeAgo(data.lastSync) : 'Never';
-  const syncInfoCard = h('div', { 
-    class: 'vs-glass', 
-    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);' 
+  // Sync delta information card — always reads from local storage (this device's actual sync time)
+  const localSyncData = await local.get(STORAGE_KEYS.LAST_SYNC_AT);
+  const localLastSync = localSyncData[STORAGE_KEYS.LAST_SYNC_AT];
+  const isNeverSynced = !localLastSync || localLastSync === '1970-01-01T00:00:00.000Z';
+  const lastSyncText = isNeverSynced ? 'Never' : formatTimeAgo(localLastSync);
+
+  const syncInfoCard = h('div', {
+    class: 'vs-glass',
+    style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);'
   },
     h('div', { style: 'font-weight:600; font-size:12px; margin-bottom:8px;', text: 'Synchronization & Data' }),
     h('div', { style: 'font-size:11px; display:flex; flex-direction:column; gap:4px;' },
       h('div', { style: 'display:flex; justify-content:space-between;' },
-        h('span', { class: 'vs-faint', text: 'Un-synced changes queue:' }),
-        h('span', { 
-          style: `font-weight:600; color:${offlineQueue.length > 0 ? 'var(--vs-warning, #f59e0b)' : 'inherit'};`, 
-          text: `${offlineQueue.length} batch(es)` 
+        h('span', { class: 'vs-faint', text: 'Un-synced changes:' }),
+        h('span', {
+          style: `font-weight:600; color:${offlineQueue.length > 0 ? 'var(--vs-warning, #f59e0b)' : 'inherit'};`,
+          text: `${offlineQueue.length} batch(es)`
         })
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },
-        h('span', { class: 'vs-faint', text: 'Last Sync Timestamp:' }),
+        h('span', { class: 'vs-faint', text: 'Last Sync (this device):' }),
         h('span', { style: 'font-weight:500;', text: lastSyncText })
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },
-        h('span', { class: 'vs-faint', text: 'Spreadsheet Database Size:' }),
+        h('span', { class: 'vs-faint', text: 'Spreadsheet DB Size:' }),
         h('span', { style: 'font-weight:500;', text: connected ? `${health?.vaultEntries ?? 0} entries` : 'Offline' })
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },
@@ -1728,7 +1790,7 @@ async function renderAnalytics() {
   view.entryId = null;
   rememberView();
   clear(app);
-  
+
   const content = h('div', { class: 'okey-section-title', style: 'margin: 20px', text: 'Loading analytics...' });
   app.append(h('div', { class: 'okey-view' },
     viewHeader('Analytics', renderMain),

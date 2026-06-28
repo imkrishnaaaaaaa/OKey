@@ -105,7 +105,13 @@ async function refreshDashboardAfterSync() {
 
 function renderHomeDashboard() {
   if (!dashboardData) return null;
-  const lastSyncText = dashboardData.lastSync ? formatTimeAgo(dashboardData.lastSync) : 'Never';
+  // Always use the local storage sync time for consistency with other views
+  const storedSync = store.get ? null : null; // resolved asynchronously below
+  const lastSyncEl = h('span', { class: 'vs-faint', text: 'Synced: …' });
+  local_getLastSync().then((t) => {
+    const isNever = !t || t === '1970-01-01T00:00:00.000Z';
+    lastSyncEl.textContent = `Synced: ${isNever ? 'Never' : formatTimeAgo(t)}`;
+  });
   return h('div', { class: 'okey-home-dashboard vs-glass', style: 'padding:12px; margin: 0 12px 12px 12px; border-radius:12px; font-size:12px; border:1px solid var(--vs-border);' },
     h('div', { style: 'display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:center; font-weight:bold; margin-bottom: 8px;' },
       h('div', {}, h('div', { style: 'font-size:15px; color:var(--vs-brand);' }, dashboardData.activeEntries ?? 0), h('div', { class: 'vs-faint', style: 'font-size:9px;' }, 'Active')),
@@ -115,9 +121,16 @@ function renderHomeDashboard() {
     ),
     h('div', { style: 'display:flex; justify-content:space-between; font-size:10px; border-top: 1px solid var(--vs-border); padding-top:6px;' },
       h('span', { class: 'vs-faint' }, `Total Items: ${dashboardData.totalEntries ?? 0}`),
-      h('span', { class: 'vs-faint' }, `Synced: ${lastSyncText}`)
+      lastSyncEl
     )
   );
+}
+
+async function local_getLastSync() {
+  try {
+    const r = await store.get(STORAGE_KEYS.LAST_SYNC_AT);
+    return r[STORAGE_KEYS.LAST_SYNC_AT] || null;
+  } catch { return null; }
 }
 
 // ---------- DOM helper ----------
@@ -183,9 +196,19 @@ async function faviconFor(domain) {
   } catch { return hit?.dataUrl || null; }
 }
 function initialLetter(e) { const s = e.nickname || e.siteName || e.domain?.replace(/^www\./, '') || '?'; return s[0].toUpperCase(); }
-function avatar(e) {
-  const a = h('div', { class: 'vs-avatar' }, initialLetter(e));
-  if (e.domain) faviconFor(e.domain).then((u) => { if (u) { clear(a); a.append(h('img', { src: u, alt: '' })); } });
+function avatar(e, clickable = false) {
+  const hasDomain = !!e.domain;
+  const a = h('div', {
+    class: 'vs-avatar' + (clickable && hasDomain ? ' vs-avatar-link' : ''),
+    title: clickable && hasDomain ? `Open ${e.domain}` : undefined,
+  }, initialLetter(e));
+  if (hasDomain) faviconFor(e.domain).then((u) => { if (u) { clear(a); a.append(h('img', { src: u, alt: '' })); } });
+  if (clickable && hasDomain) {
+    a.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      window.open(`https://${e.domain}`, '_blank');
+    });
+  }
   return a;
 }
 
@@ -385,6 +408,25 @@ function renderRecover() {
 }
 
 // ============================ main ============================
+function buildVersionBanner() {
+  if (!backendVersionMismatch) return null;
+  if (sessionStorage.getItem('okey_hide_version_banner')) return null;
+  const localVer = APP.VERSION;
+  const backendVer = APP.APPSCRIPT_VERSION;
+  const banner = h('div', { class: 'okey-version-banner' },
+    h('span', { class: 'okey-banner-icon', text: '⚠' }),
+    h('span', { class: 'okey-banner-msg', text: `Version mismatch — App v${localVer} · Backend v${backendVer}` }),
+    h('button', { class: 'okey-banner-close', title: 'Dismiss', 'aria-label': 'Dismiss banner', text: '✕', onclick: (e) => {
+      e.stopPropagation();
+      sessionStorage.setItem('okey_hide_version_banner', '1');
+      banner.style.transition = 'opacity 0.18s ease';
+      banner.style.opacity = '0';
+      setTimeout(() => banner.remove(), 200);
+    }})
+  );
+  return banner;
+}
+
 function renderMain() {
   view.name = 'main';
   clear(app);
@@ -413,9 +455,7 @@ function renderMain() {
   const body = h('main', { class: 'okey-body' });
   const fab = h('button', { class: 'okey-fab', html: '+', title: 'Add', onclick: () => renderEdit(null) });
   
-  const updateBanner = backendVersionMismatch
-    ? h('div', { class: 'okey-warn', style: 'margin: 8px 12px; font-weight: 600;', text: 'WARNING: Apps Script backend version mismatch. Please update your Google Sheet Apps Script code.' })
-    : null;
+  const updateBanner = buildVersionBanner();
   const dashPanel = renderHomeDashboard();
 
   app.append(...[header, updateBanner, dashPanel, h('div', { class: 'okey-searchbar' }, search), tabs, body, fab].filter(Boolean));
@@ -546,7 +586,7 @@ function list(body, q) {
 
     const row = h('div', { class: 'okey-entry' },
       selectMode ? h('input', { type: 'checkbox', class: 'okey-checkbox', checked: selected.has(e.id),
-        onclick: (ev) => { ev.stopPropagation(); selected.has(e.id) ? selected.delete(e.id) : selected.add(e.id); list(body, q); } }) : avatar(e),
+        onclick: (ev) => { ev.stopPropagation(); selected.has(e.id) ? selected.delete(e.id) : selected.add(e.id); list(body, q); } }) : avatar(e, true),
       h('div', { class: 'okey-entry-main' },
         h('div', { class: 'okey-entry-title', text: e.nickname || e.siteName || getDisplayDomain(e.domain) || 'Untitled' }),
         h('div', { class: 'okey-entry-sub', text: getEntrySubText(e) }),
@@ -1164,8 +1204,11 @@ async function renderDashboard() {
     )
   );
 
-  // Sync delta information card
-  const lastSyncText = data?.lastSync ? formatTimeAgo(data.lastSync) : 'Never';
+  // Sync delta information card — always reads from local storage (this device's actual sync time)
+  const localLastSync = await local_getLastSync();
+  const isNeverSynced = !localLastSync || localLastSync === '1970-01-01T00:00:00.000Z';
+  const lastSyncText = isNeverSynced ? 'Never' : formatTimeAgo(localLastSync);
+
   const syncInfoCard = h('div', { 
     class: 'vs-glass', 
     style: 'padding: 12px; margin-bottom: 12px; border-radius: 8px; border: 1px solid var(--vs-border);' 
@@ -1180,7 +1223,7 @@ async function renderDashboard() {
         })
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },
-        h('span', { class: 'vs-faint', text: 'Last Sync Timestamp:' }),
+        h('span', { class: 'vs-faint', text: 'Last Sync (this device):' }),
         h('span', { style: 'font-weight:500;', text: lastSyncText })
       ),
       h('div', { style: 'display:flex; justify-content:space-between;' },

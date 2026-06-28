@@ -277,3 +277,71 @@
   letter-spacing: 0.05em;
   font-weight: 600;
 }
+
+/* ---- Version Mismatch Banner ---- */
+.okey-version-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 0 12px 4px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.09);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vs-text);
+  animation: okey-slide-down 0.2s ease;
+}
+
+.okey-banner-icon {
+  color: #f59e0b;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.okey-banner-msg {
+  flex: 1;
+  line-height: 1.35;
+}
+
+.okey-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--vs-text-muted);
+  font-size: 16px;
+  padding: 0 2px;
+  border-radius: 4px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.okey-banner-close:hover {
+  color: var(--vs-text);
+  background: rgba(0,0,0,0.08);
+}
+
+@keyframes okey-slide-down {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+/* ---- Clickable avatar (domain open) ---- */
+.vs-avatar-link {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.vs-avatar-link:hover {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 2.5px var(--vs-brand-soft), 0 2px 8px rgba(109, 94, 252, 0.2);
+}
+
+.vs-avatar-link:active {
+  transform: scale(0.96);
+}

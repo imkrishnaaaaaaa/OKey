@@ -39,7 +39,11 @@ async function triggerSingleMatchAutofill() {
 }
 
 const SVG_KEY =
-  '<svg viewBox="0 0 24 24" fill="none" width="14" height="14"><rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#fff" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#fff" stroke-width="2"/></svg>';
+  '<svg viewBox="0 0 24 24" fill="none" width="13" height="13">' +
+  '<rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#6d5efc" stroke-width="2"/>' +
+  '<path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#6d5efc" stroke-width="2"/>' +
+  '<circle cx="12" cy="15.5" r="1.4" fill="#6d5efc"/>' +
+  '</svg>';
 
 function isPasswordField(el) {
   return el.tagName === 'INPUT' && el.type === 'password';
@@ -191,7 +195,7 @@ function attach(el) {
   const reposition = () => {
     const r = el.getBoundingClientRect();
     if (r.width < 40 || r.height < 12 || el.offsetParent === null) { badge.style.display = 'none'; return; }
-    const size = r.height < 30 ? 16 : 20; // scale to input (feedback #18)
+    const size = r.height < 30 ? 18 : 22; // scale to input — sized for circle badge
     badge.style.width = badge.style.height = `${size}px`;
     badge.style.left = `${window.scrollX + r.right - size - 6}px`;
     badge.style.top = `${window.scrollY + r.top + (r.height - size) / 2}px`;

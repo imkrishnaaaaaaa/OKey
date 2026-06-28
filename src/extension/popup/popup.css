@@ -140,7 +140,8 @@ body {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  background: rgba(109, 94, 252, 0.05); /* lighter shade of main brand purple color */
+  background: rgba(109, 94, 252, 0.05);
+  /* lighter shade of main brand purple color */
   border: 1px solid rgba(109, 94, 252, 0.1);
   border-radius: var(--vs-radius-lg, 12px);
   margin-bottom: 8px;
@@ -175,7 +176,8 @@ body {
 .okey-entry-sub {
   font-size: var(--vs-fs-sm);
   color: var(--vs-text-muted);
-  opacity: 0.65; /* dimmed color */
+  opacity: 0.65;
+  /* dimmed color */
   margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
@@ -575,8 +577,8 @@ body {
 /* Floating Lock button */
 .okey-lock-fab {
   position: fixed;
-  right: 60px;
-  bottom: 60px;
+  right: 30px;
+  bottom: 65px;
   width: 38px;
   height: 38px;
   border-radius: var(--vs-radius-pill);
@@ -625,8 +627,15 @@ body {
 }
 
 @keyframes vs-pop {
-  from { opacity: 0; transform: scale(0.9); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .okey-menu-item {
@@ -680,4 +689,72 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 600;
+}
+
+/* ---- Version Mismatch Banner ---- */
+.okey-version-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  margin: 4px 10px 0;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.09);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--vs-text);
+  animation: okey-slide-down 0.2s ease;
+}
+
+.okey-banner-icon {
+  color: #f59e0b;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.okey-banner-msg {
+  flex: 1;
+  line-height: 1.35;
+}
+
+.okey-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--vs-text-muted);
+  font-size: 15px;
+  padding: 0 2px;
+  border-radius: 4px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.okey-banner-close:hover {
+  color: var(--vs-text);
+  background: rgba(0,0,0,0.08);
+}
+
+@keyframes okey-slide-down {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+/* ---- Clickable avatar (domain open) ---- */
+.vs-avatar-link {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.vs-avatar-link:hover {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 2.5px var(--vs-brand-soft), 0 2px 8px rgba(109, 94, 252, 0.2);
+}
+
+.vs-avatar-link:active {
+  transform: scale(0.96);
 }

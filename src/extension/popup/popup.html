@@ -1,18 +1,20 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
-
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OKey</title>
-  <link rel="stylesheet" href="../styles/design-tokens.css" />
-  <link rel="stylesheet" href="../styles/components.css" />
+  <link rel="stylesheet" href="../../styles/nebula/tokens.css" />
+  <link rel="stylesheet" href="../../styles/nebula/aurora.css" />
+  <link rel="stylesheet" href="../../styles/nebula/components.css" />
+  <link rel="stylesheet" href="../../styles/nebula/motion.css" />
+  <link rel="stylesheet" href="../../styles/nebula/showpiece.css" />
+    <link rel="stylesheet" href="../../styles/nebula/screens.css" />
   <link rel="stylesheet" href="popup.css" />
 </head>
-
 <body>
-  <div id="app" class="okey-frame" aria-live="polite"></div>
+  <canvas id="nebula" aria-hidden="true"></canvas>
+  <div id="app" class="nb-app okey-frame" aria-live="polite"></div>
   <script type="module" src="popup.js"></script>
 </body>
-
 </html>

@@ -42,7 +42,7 @@ export async function cacheDek(dekBytes, autoLockSeconds) {
   const settings = sStore['okey_settings'] || {};
 
   const extSeconds = clamp(settings.autoLockTimeout || autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  const miniSeconds = Number(settings.miniAutoLockTimeout) || 300;
+  const miniSeconds = clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600);
 
   const now = Date.now();
   await chrome.storage.session.set({
@@ -77,7 +77,7 @@ export async function touchSession(type = 'extension') {
   }
 
   const autoLockSeconds = viewType === 'mini'
-    ? (settings.miniAutoLockTimeout || 300)
+    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600)
     : (settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS);
 
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
@@ -109,10 +109,12 @@ export async function touchSession(type = 'extension') {
 
 /**
  * Return the cached DEK bytes if still valid for the specified view type, else null.
- * Touch-extends the expiry on access.
+ * By default touches (extends) the expiry — pass `{ touch:false }` from
+ * background paths (periodic sync) so housekeeping never keeps the vault alive
+ * (revamp H7).
  * @returns {Promise<Uint8Array|null>}
  */
-export async function getCachedDek(type = 'extension') {
+export async function getCachedDek(type = 'extension', { touch = true } = {}) {
   let viewType = type;
   if (typeof type === 'number') {
     viewType = 'extension';
@@ -137,8 +139,10 @@ export async function getCachedDek(type = 'extension') {
     return null;
   }
 
+  if (!touch) return base64ToBytes(s[K.DEK]);
+
   const autoLockSeconds = viewType === 'mini'
-    ? (settings.miniAutoLockTimeout || 300)
+    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600)
     : (settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS);
 
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);

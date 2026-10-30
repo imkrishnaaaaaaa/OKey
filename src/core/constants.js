@@ -7,15 +7,13 @@
 
 export const APP = Object.freeze({
   NAME: 'OKey',
-  VERSION: '1.0.0',
-  APPSCRIPT_VERSION: '1.0.0',
+  VERSION: '2.3.0',
   SCHEMA_VERSION: '1.0.0',
   /** Bumped when the at-rest vault container format changes. */
   VAULT_FORMAT_VERSION: 2,
   /** Bumped when an individual entry's schema changes. */
   ENTRY_SCHEMA_VERSION: 1,
   MAX_ENTRIES: 10000,
-  MAX_SHEETS: 3,
 });
 
 /**
@@ -98,15 +96,16 @@ export const PASSWORD_GEN = Object.freeze({
   PASSPHRASE_SEPARATOR: '-',
 });
 
-/** Favicon caching policy (privacy: fetch once, cache locally, refresh weekly). */
+/** Favicon caching policy (privacy: OFF by default — fetching leaks the vault's
+ *  domain list to the provider. Opt in per device in Settings.) */
 export const FAVICON = Object.freeze({
-  ENABLED: true,
+  ENABLED: false,
   SIZE: 32,
   REFRESH_AFTER_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
   PROVIDER: 'https://www.google.com/s2/favicons',
 });
 
-/** User settings synced via the Sheet (non-sensitive). */
+/** User settings synced via the cloud (non-sensitive). */
 export const DEFAULT_SETTINGS = Object.freeze({
   autoLockTimeout: SECURITY.DEFAULT_AUTO_LOCK_SECONDS,
   miniAutoLockTimeout: 300,
@@ -117,7 +116,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   syncIntervalMinutes: SYNC.DEFAULT_INTERVAL_MINUTES,
   showRecents: true,
   recentsMaxCount: 10,
-  faviconsEnabled: true,
+  faviconsEnabled: FAVICON.ENABLED,
   autoSubmitEnabled: false,
   autoFillSingleMatch: false,
   theme: 'system',
@@ -132,7 +131,6 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 /**
  * Storage keys (clean-slate `okey_` namespace).
- * A migration shim maps any legacy `vaultsheet_` keys on first run.
  */
 export const STORAGE_KEYS = Object.freeze({
   VAULT_DATA: 'okey_vault',
@@ -142,7 +140,6 @@ export const STORAGE_KEYS = Object.freeze({
   WRAPPED_BY_RECOVERY: 'okey_wrapped_recovery',
   VAULT_METADATA: 'okey_metadata',
   SETTINGS: 'okey_settings',
-  SHEETS_CONFIG: 'okey_sheets',
   OFFLINE_QUEUE: 'okey_offline_queue',
   LAST_SYNC_AT: 'okey_last_sync',
   RECENTS: 'okey_recents',
@@ -152,29 +149,9 @@ export const STORAGE_KEYS = Object.freeze({
   BIOMETRIC_CRED_ID: 'okey_biometric_cred_id',
   BIOMETRIC_WRAPPED: 'okey_biometric_wrapped',
   SCHEMA_MIGRATED: 'okey_schema_migrated',
-  CACHED_FOLDERS: 'okey_cached_folders',
-  FOLDERS_CACHE_TIME: 'okey_folders_cache_time',
   FAILED_UNLOCK_ATTEMPTS: 'okey_failed_unlocks',
-  BACKEND_VERSION_MISMATCH: 'okey_backend_version_mismatch',
-  BACKEND_CAPABILITIES: 'okey_backend_capabilities',
-  BACKEND_DASHBOARD: 'okey_backend_dashboard',
-  BACKEND_ANALYTICS: 'okey_backend_analytics',
-  ANALYTICS_CACHE_TIME: 'okey_analytics_cache_time',
-});
-
-/** Legacy → new storage-key map for one-time migration of test data. */
-export const LEGACY_STORAGE_KEYS = Object.freeze({
-  vaultsheet_vault: STORAGE_KEYS.VAULT_DATA,
-  vaultsheet_salt: STORAGE_KEYS.VAULT_SALT,
-  vaultsheet_kdf_params: STORAGE_KEYS.KDF_PARAMS,
-  vaultsheet_metadata: STORAGE_KEYS.VAULT_METADATA,
-  vaultsheet_settings: STORAGE_KEYS.SETTINGS,
-  vaultsheet_sheets: STORAGE_KEYS.SHEETS_CONFIG,
-  vaultsheet_offline_queue: STORAGE_KEYS.OFFLINE_QUEUE,
-  vaultsheet_last_sync: STORAGE_KEYS.LAST_SYNC_AT,
-  vaultsheet_recents: STORAGE_KEYS.RECENTS,
-  vaultsheet_theme: STORAGE_KEYS.THEME,
-  vaultsheet_setup_complete: STORAGE_KEYS.SETUP_COMPLETE,
+  PIN_UI_FAILURES: 'okey_pin_ui_failures',
+  PIN_LOCKED_UNTIL: 'okey_pin_locked_until',
 });
 
 export const ENTRY_TYPES = Object.freeze({
@@ -182,11 +159,3 @@ export const ENTRY_TYPES = Object.freeze({
   TOTP: 'totp',
 });
 
-/** Sheet tab names (clean-slate OKey branding). */
-export const SHEET_NAMES = Object.freeze({
-  VAULT: 'OKeyVault',
-  META: 'OKeyMeta',
-  SETTINGS: 'OKeySettings',
-  ORDER: 'OKeyOrder',
-  CONFLICTS: 'OKeyConflicts',
-});

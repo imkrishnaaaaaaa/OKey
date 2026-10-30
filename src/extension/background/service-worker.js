@@ -2,7 +2,7 @@
  * OKey Extension — MV3 Service Worker
  *
  * Stateless and event-driven (the SW may terminate at any time). It owns:
- *   - install/update + legacy storage migration
+ *   - install/update
  *   - auto-lock, clipboard-clear, and 24h background-sync alarms
  *   - idle / OS-lock → purge the session DEK
  *   - content-script queries (current site, matched credentials)
@@ -14,11 +14,12 @@
 
 import { MSG } from '../lib/messages.js';
 import { SYNC, SECURITY, STORAGE_KEYS, DEFAULT_SETTINGS } from '../../core/constants.js';
+import { sanitizeSettings } from '../../core/settings.js';
 import { Vault } from '../../core/vault.js';
-import { SyncEngine } from '../../core/sync.js';
+import { CloudStore } from '../../core/cloud.js';
 import { matchDomain, extractDomain } from '../../core/domain-matcher.js';
+import { generateTOTP, isValidTotpSecret } from '../../core/totp.js';
 import { ChromeStorageAdapter, chromeNetwork } from '../lib/platform.js';
-import { migrateLegacyStorage } from '../lib/migration.js';
 import { getCachedDek, clearSession, isPopupOpen, hardenSession, touchSession, checkAndClearSessionIfExpired, cacheDek } from '../lib/session.js';
 
 const local = new ChromeStorageAdapter('local');
@@ -34,7 +35,6 @@ chrome.idle.onStateChanged.addListener(onIdle);
 // ---- Install / update ----
 async function onInstalled(details) {
   await hardenSession();
-  await migrateLegacyStorage();
   if (details.reason === 'install') {
     const cur = await local.get(STORAGE_KEYS.SETTINGS);
     if (!cur[STORAGE_KEYS.SETTINGS]) await local.set({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
@@ -62,6 +62,12 @@ function onMessage(message, sender, sendResponse) {
 }
 
 async function route(message, sender) {
+  // Content scripts are untrusted callers: verify the sender is OUR extension
+  // and comes from a real tab before serving secrets or accepting writes.
+  if (CONTENT_ONLY_TYPES.has(message.type) && !isTrustedContentSender(sender)) {
+    return { success: false, error: 'Rejected sender' };
+  }
+
   switch (message.type) {
     case MSG.GET_SETTINGS:
       return { success: true, settings: await getSettings() };
@@ -72,7 +78,9 @@ async function route(message, sender) {
     case MSG.GET_CURRENT_SITE:
       return getCurrentSite();
     case MSG.GET_SITE_CREDENTIALS:
-      return getSiteCredentials(message.url);
+      // Trust only the tab the request actually came from — never a
+      // client-supplied URL (revamp H6).
+      return getSiteCredentials(sender.tab?.url || sender.origin || '');
     case MSG.TRIGGER_SYNC:
       return backgroundSync();
     case MSG.LOCK_VAULT:
@@ -101,6 +109,19 @@ async function route(message, sender) {
   }
 }
 
+/** Message types that may only come from content scripts in a tab. */
+const CONTENT_ONLY_TYPES = new Set([
+  MSG.GET_SITE_CREDENTIALS,
+  MSG.ADD_CREDENTIAL,
+  MSG.SET_ACTIVE_FILLING_SESSION,
+  MSG.GET_ACTIVE_FILLING_SESSION,
+  MSG.CLEAR_ACTIVE_FILLING_SESSION,
+]);
+
+function isTrustedContentSender(sender) {
+  return sender?.id === chrome.runtime.id && typeof sender?.tab?.id === 'number';
+}
+
 // ---- Settings ----
 async function getSettings() {
   const s = await local.get(STORAGE_KEYS.SETTINGS);
@@ -108,9 +129,11 @@ async function getSettings() {
 }
 
 async function updateSettings(patch) {
-  const merged = { ...(await getSettings()), ...patch };
+  // Allowlist + clamp: settings arrive from popup/content scripts and (via
+  // sync) ultimately from the cloud — treat all of it as untrusted.
+  const merged = sanitizeSettings(patch, await getSettings());
   await local.set({ [STORAGE_KEYS.SETTINGS]: merged });
-  if (patch.syncIntervalMinutes) await scheduleSyncAlarm();
+  if (patch?.syncIntervalMinutes) await scheduleSyncAlarm();
 
   // Broadcast settings update to content scripts in tabs
   try {
@@ -146,9 +169,9 @@ async function getCurrentSite() {
 }
 
 /**
- * Return credentials for a URL for the content script. Only when unlocked; only
- * fields needed to fill. Includes a fallback list of other entries so the user
- * can still pick something when nothing matches the site.
+ * Return credentials for the requesting tab's URL. Only when unlocked; only
+ * fields needed to fill. TOTP codes are computed HERE — the raw secret never
+ * leaves the extension's trusted context (revamp A7).
  */
 async function getSiteCredentials(url) {
   const vault = await openTransientVault('mini');
@@ -157,17 +180,21 @@ async function getSiteCredentials(url) {
   const all = vault.getEntries({ type: 'password' });
   const ranked = matchDomain(url, all);
   const rankedIds = new Set(ranked.map((m) => m.id));
-  const toCred = (e) => ({
+  const toCred = async (e) => ({
     id: e.id,
     siteName: e.siteName || e.domain,
     domain: e.domain,
     username: e.username,
     password: e.password,
     hasTotp: !!e.totpSecret,
-    totpSecret: e.totpSecret,
+    totpCode: e.totpSecret && isValidTotpSecret(e.totpSecret)
+      ? (await generateTOTP(e.totpSecret).catch(() => ({}))).code || null
+      : null,
   });
-  const matches = ranked.map((m) => toCred(all.find((e) => e.id === m.id))).filter(Boolean);
-  const others = all.filter((e) => !rankedIds.has(e.id)).slice(0, 8).map(toCred);
+  const matches = await Promise.all(
+    ranked.map((m) => all.find((e) => e.id === m.id)).filter(Boolean).map(toCred)
+  );
+  const others = await Promise.all(all.filter((e) => !rankedIds.has(e.id)).slice(0, 8).map(toCred));
   vault.lock();
   return { success: true, locked: false, matches, others, settings };
 }
@@ -180,36 +207,54 @@ async function addCredential(data) {
   try {
     const entry = await vault.addEntry(data);
     vault.lock();
-    // Sync updates to Google Sheets in the background
+    // Never echo the TOTP secret (or any other secret beyond fill needs)
+    // back into the page context.
+    const safeEntry = {
+      id: entry.id,
+      siteName: entry.siteName || entry.domain,
+      domain: entry.domain,
+      username: entry.username,
+      password: entry.password,
+      hasTotp: !!entry.totpSecret,
+    };
     backgroundSync().catch(console.error);
-    return { success: true, entry };
+    return { success: true, entry: safeEntry };
   } catch (err) {
     vault.lock();
     return { success: false, error: err.message };
   }
 }
 
-// ---- Background sync (only when popup closed, vault unlocked) ----
+// ---- Background sync ----
+// Runs only when the user is signed in (Firebase auth rehydrates in this
+// context) AND the vault session is alive. Fails closed otherwise.
+let _cloudSyncChain = Promise.resolve({ pushed: 0 });
 async function backgroundSync() {
   if (await isPopupOpen()) return { success: false, skipped: 'popup-open' };
-  const vault = await openTransientVault('extension');
+  const vault = await openTransientVault('extension', { touch: false });
   if (!vault) return { success: false, skipped: 'locked' };
   try {
-    const engine = new SyncEngine(local, chromeNetwork);
-    const result = await engine.sync(vault);
-    broadcast(MSG.SYNC_COMPLETE, { result });
-    return { success: true, ...result };
+    const { getAuth } = await import('firebase/auth');
+    const uid = getAuth().currentUser?.uid || null;
+    const token = await getAuth().currentUser?.getIdToken().catch(() => null);
+    if (!uid || !token) return { success: false, skipped: 'signed-out' };
+    const { FIREBASE_CONFIG } = await import('../../lib/firebase-config.js');
+    const cloud = new CloudStore({ projectId: FIREBASE_CONFIG.projectId, getToken: async () => token });
+    const records = await vault.exportRecords();
+    await cloud.pushEntries(uid, records.slice(-50)); // ponytail: bg sync pushes latest 50; full delta runs on next popup unlock
+    broadcast(MSG.SYNC_COMPLETE, {});
+    return { success: true };
   } catch (err) {
-    broadcast(MSG.SYNC_ERROR, { error: err.message });
-    return { success: false, error: err.message };
+    return { success: false, error: String(err && err.message || err).slice(0, 120) };
   } finally {
     vault.lock();
   }
 }
+void _cloudSyncChain;
 
 /** Build a transient Vault from the session DEK, or null if locked. */
-async function openTransientVault(type = 'extension') {
-  const dek = await getCachedDek(type);
+async function openTransientVault(type = 'extension', opts = {}) {
+  const dek = await getCachedDek(type, opts);
   if (!dek) return null;
   const vault = new Vault(local);
   try {
@@ -222,17 +267,34 @@ async function openTransientVault(type = 'extension') {
   }
 }
 
+// ---- Unlock rate limiting (revamp M4) ----
+// Escalating delay before Argon2 runs; state lives in RAM-only session storage.
+const UNLOCK_MAX_ATTEMPTS = 5;
+const UNLOCK_BASE_DELAY_MS = 2000;
+const UNLOCK_MAX_DELAY_MS = 60000;
+
+async function getUnlockAttempts() {
+  const s = await chrome.storage.session.get('okey_unlock_attempts');
+  return Number(s.okey_unlock_attempts) || 0;
+}
+
 async function unlockVault(pin) {
+  const attempts = await getUnlockAttempts();
+  const delayMs = Math.min(UNLOCK_BASE_DELAY_MS * 2 ** Math.min(attempts, 6), UNLOCK_MAX_DELAY_MS);
+  if (attempts > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+
   const settings = await getSettings();
   const vault = new Vault(local);
   try {
     await vault.unlock(pin);
+    await chrome.storage.session.remove('okey_unlock_attempts');
     const dek = vault.exportDek();
     await cacheDek(dek, settings.autoLockTimeout);
     dek.fill(0);
     vault.lock();
     return { success: true };
   } catch (err) {
+    await chrome.storage.session.set({ okey_unlock_attempts: attempts + 1 });
     return { success: false, error: err.message };
   }
 }
@@ -255,23 +317,38 @@ async function onAlarm(alarm) {
   }
 }
 
+/**
+ * Clear the clipboard only if the user hasn't copied something else since we
+ * copied for them (revamp M9). Read-back is best effort — restricted tabs and
+ * unfocused windows fail silently, in which case we keep the old behavior of
+ * clearing anyway.
+ */
 async function clearClipboard() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => navigator.clipboard.writeText('').catch(() => {}),
-      });
-    }
+    if (!tab?.id) return;
+    const [{ result: current } = {}] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => navigator.clipboard.readText().catch(() => null),
+    });
+    const ours = (await chrome.storage.session.get('okey_copied_value')).okey_copied_value;
+    if (ours && current && current !== ours) return; // user copied their own thing — leave it
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => navigator.clipboard.writeText('').catch(() => {}),
+    });
   } catch {
     /* tab may be a restricted page */
+  } finally {
+    await chrome.storage.session.remove('okey_copied_value');
   }
 }
 
 // ---- Idle / OS lock ----
 async function onIdle(state) {
-  if (state === 'locked') {
+  // Both 'locked' (OS screen lock) and 'idle' (no interaction for the
+  // detection interval) must purge the session (revamp H7).
+  if (state === 'locked' || state === 'idle') {
     await clearSession();
     broadcast(MSG.VAULT_LOCKED);
   }
@@ -289,25 +366,31 @@ function clampClip(s) {
 }
 
 // ---- Active Filling Session Storage ----
+// chrome.storage.session is memory-only and hidden from content scripts —
+// plaintext credentials never touch disk (revamp H5).
+async function fillSessionKey(tabId) {
+  return `okey_fill_session_${tabId}`;
+}
+
 async function setActiveFillingSession(cred, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { success: false, error: 'No tab ID found' };
-  const key = `okey_fill_session_${tabId}`;
-  await local.set({ [key]: { cred, timestamp: Date.now() } });
+  const key = await fillSessionKey(tabId);
+  await chrome.storage.session.set({ [key]: { cred, timestamp: Date.now() } });
   return { success: true };
 }
 
 async function getActiveFillingSession(sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { success: false, error: 'No tab ID found' };
-  const key = `okey_fill_session_${tabId}`;
-  const s = await local.get(key);
+  const key = await fillSessionKey(tabId);
+  const s = await chrome.storage.session.get(key);
   const data = s[key];
   if (data && (Date.now() - data.timestamp < 60000)) {
     return { success: true, session: data };
   }
   if (data) {
-    await local.remove(key);
+    await chrome.storage.session.remove(key);
   }
   return { success: true, session: null };
 }
@@ -315,13 +398,11 @@ async function getActiveFillingSession(sender) {
 async function clearActiveFillingSession(sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { success: false, error: 'No tab ID found' };
-  const key = `okey_fill_session_${tabId}`;
-  await local.remove(key);
+  await chrome.storage.session.remove(await fillSessionKey(tabId));
   return { success: true };
 }
 
 // Cleanup active filling sessions when tabs are closed
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const key = `okey_fill_session_${tabId}`;
-  local.remove(key).catch(() => {});
+  fillSessionKey(tabId).then((key) => chrome.storage.session.remove(key)).catch(() => {});
 });

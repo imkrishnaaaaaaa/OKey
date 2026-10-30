@@ -1,0 +1,98 @@
+/* ============================================================================
+ * OKEY 2.2 — BLOOM BACKDROP & SOFT SURFACES
+ * Pastel ambient color drifts behind frosted-white surfaces.
+ * ==========================================================================*/
+
+.nb-app {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Ambient bloom: pastel washes drifting behind the UI ---- */
+.aurora {
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: var(--aurora-opacity);
+  filter: blur(80px) saturate(120%);
+}
+.aurora span {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+}
+.aurora .a1 {
+  width: 55vmax; height: 55vmax;
+  left: -12%; top: -18%;
+  background: radial-gradient(circle at 30% 30%, rgba(134, 118, 240, 0.20), rgba(134, 118, 240, 0) 62%);
+  animation: drift-a 26s ease-in-out infinite alternate;
+}
+.aurora .a2 {
+  width: 48vmax; height: 48vmax;
+  right: -14%; top: 8%;
+  background: radial-gradient(circle at 60% 40%, rgba(183, 171, 255, 0.22), rgba(183, 171, 255, 0) 64%);
+  animation: drift-b 34s ease-in-out infinite alternate;
+}
+.aurora .a3 {
+  width: 42vmax; height: 42vmax;
+  left: 22%; bottom: -22%;
+  background: radial-gradient(circle at 50% 50%, rgba(233, 229, 255, 0.5), rgba(233, 229, 255, 0) 62%);
+  animation: drift-c 42s ease-in-out infinite alternate;
+}
+@keyframes drift-a { from { transform: translate(0,0) scale(1); } to { transform: translate(9%, 12%) scale(1.15); } }
+@keyframes drift-b { from { transform: translate(0,0) scale(1.05); } to { transform: translate(-10%, 8%) scale(.95); } }
+@keyframes drift-c { from { transform: translate(0,0); } to { transform: translate(-6%, -12%) scale(1.12); } }
+
+/* ---- Frosted surfaces ---- */
+.glass {
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: var(--shadow-1);
+}
+
+.glass-strong {
+  background: var(--glass-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: var(--shadow-2);
+}
+
+.card {
+  border-radius: var(--r-lg);
+  transition:
+    transform var(--dur-med) var(--spring),
+    box-shadow var(--dur-med) var(--glide),
+    background var(--dur-med);
+}
+.card.hoverable:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-2);
+}
+
+/* Headlines stay near-black; accent color is earned, not sprayed */
+.text-hero {
+  font-family: var(--font-display);
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+.text-accent { color: var(--accent); }
+
+/* Screen scaffold */
+.screen {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}

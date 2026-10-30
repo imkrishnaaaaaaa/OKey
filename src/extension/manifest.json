@@ -7,21 +7,12 @@
   "minimum_chrome_version": "110",
   "permissions": [
     "storage",
-    "unlimitedStorage",
-    "identity",
     "alarms",
     "idle",
     "scripting",
     "activeTab",
     "tabs"
   ],
-  "optional_permissions": [],
-  "oauth2": {
-    "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
-    "scopes": [
-      "https://www.googleapis.com/auth/userinfo.email"
-    ]
-  },
   "host_permissions": [
     "https://script.google.com/*",
     "https://script.googleusercontent.com/*",
@@ -51,7 +42,12 @@
     "128": "icons/icon-128.png"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; frame-ancestors http: https:"
   },
-  "web_accessible_resources": []
+  "web_accessible_resources": [
+    {
+      "resources": ["unlock/unlock.html"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
 }

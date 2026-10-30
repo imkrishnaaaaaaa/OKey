@@ -1,0 +1,122 @@
+/* ============================================================================
+ * OKEY 2.2 — SHOWPIECE LAYER (light)
+ * Ambient canvas, Keyhole orb, depth-on-hover cards. Soft, never harsh.
+ * ==========================================================================*/
+
+/* ---- ambient background canvas ---- */
+#nebula {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  background: var(--bg);
+}
+
+/* ============================ KEYHOLE ORB ============================ */
+.orb {
+  position: relative;
+  margin: 0 auto;
+  filter: drop-shadow(0 10px 24px rgba(123, 104, 238, 0.28));
+}
+.orb svg { width: 100%; height: 100%; display: block; overflow: visible; }
+
+.orb-halo {
+  fill: none;
+  stroke: rgba(123, 104, 238, 0.22);
+  stroke-width: .6;
+  stroke-dasharray: 2 4;
+  transform-origin: 50px 50px;
+  animation: orb-halo-spin 40s linear infinite;
+}
+@keyframes orb-halo-spin { to { transform: rotate(360deg); } }
+
+.orb-track {
+  fill: none;
+  stroke: rgba(28, 28, 46, 0.07);
+  stroke-width: 3;
+}
+.orb-ring {
+  fill: none;
+  stroke-width: 3.6;
+  stroke-linecap: round;
+  transform-origin: 50px 50px;
+  transform: rotate(-90deg);
+  transition: stroke-dashoffset .42s var(--spring);
+  filter: drop-shadow(0 0 6px rgba(123, 104, 238, 0.45));
+}
+.orb-core { stroke: rgba(123, 104, 238, 0.14); stroke-width: .8; }
+.orb-key { fill: var(--purple-600); transform-origin: 50px 50px; }
+
+/* idle — the vault sleeps and breathes */
+.orb[data-state='idle'] .orb-core,
+.orb[data-state='fill'] .orb-core { animation: orb-breathe-core 3.4s ease-in-out infinite; }
+@keyframes orb-breathe-core {
+  0%, 100% { opacity: .82; }
+  50% { opacity: 1; }
+}
+.orb[data-state='idle'] .orb-key { animation: orb-key-pulse 3.4s ease-in-out infinite; }
+@keyframes orb-key-pulse { 50% { opacity: .45; } }
+
+/* unlocking — spin + flare */
+.orb[data-state='unlocking'] svg { animation: orb-unlock .75s var(--glide); }
+.orb[data-state='unlocking'] { filter: drop-shadow(0 10px 30px rgba(123, 104, 238, 0.5)); }
+@keyframes orb-unlock {
+  0% { transform: scale(1) rotate(0deg); }
+  35% { transform: scale(.92) rotate(160deg); }
+  100% { transform: scale(1.06) rotate(360deg); }
+}
+
+/* open — calm confident glow */
+.orb[data-state='open'] .orb-ring { filter: drop-shadow(0 0 7px rgba(123, 104, 238, 0.55)); }
+
+/* fail — reject */
+.orb-fail { animation: nb-shake .4s var(--glide); }
+.orb-fail .orb-key { fill: var(--danger); }
+.orb-fail { filter: drop-shadow(0 0 16px rgba(239, 94, 115, 0.4)); }
+
+/* success sparks — purple confetti */
+.orb-spark {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--purple-500);
+  box-shadow: 0 1px 6px rgba(123, 104, 238, 0.5);
+  pointer-events: none;
+  animation: orb-spark .7s var(--glide) forwards;
+}
+.orb-spark:nth-child(even) { background: var(--purple-300); }
+@keyframes orb-spark {
+  from { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  to { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(.2); opacity: 0; }
+}
+
+/* ============================ DEPTH CARDS ============================ */
+/* Hover earns depth: soft lift + diffused shadow bloom. No borders, no conics. */
+.ok-entry { position: relative; }
+.ok-entry:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-2);
+}
+.ok-entry:active { transform: translateY(-1px) scale(.985); transition-duration: 80ms; }
+
+.ok-field-card:hover {
+  box-shadow: var(--shadow-2);
+  transform: translateY(-1px);
+}
+
+/* hero display type */
+.text-mega {
+  font-family: var(--font-display);
+  font-size: clamp(38px, 11vw, 46px);
+  font-weight: 800;
+  letter-spacing: -.035em;
+  line-height: 1.05;
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-halo { animation: none !important; }
+}

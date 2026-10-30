@@ -8,7 +8,7 @@
  * --------------
  * - All entry data is encrypted with a random 256-bit Data Encryption Key (DEK,
  *   a.k.a. "vault key"). The DEK never leaves RAM in plaintext and never touches
- *   the Sheet, sync storage, or disk unencrypted.
+ *   the cloud, sync storage, or disk unencrypted.
  * - The DEK is *wrapped* (encrypted) under Key Encryption Keys (KEKs) derived
  *   from (a) the master password and (b) the recovery key. Changing the master
  *   password or recovering only re-wraps the DEK — entry ciphertext is untouched.

@@ -21,7 +21,7 @@
  *   Only `domain` is cleartext metadata (searchable, per product decision).
  */
 
-import { APP, STORAGE_KEYS, LEGACY_STORAGE_KEYS, ENTRY_TYPES, SECURITY } from './constants.js';
+import { APP, STORAGE_KEYS, ENTRY_TYPES, SECURITY } from './constants.js';
 import {
   generateDek, importAesKey, encryptJson, decryptJson, wrapKeyMaterial, unwrapKeyMaterial,
   generateSalt, secureWipe,
@@ -108,10 +108,10 @@ export class Vault {
   }
 
   /**
-   * Initialize local storage from a remote sheet's key material and test decryption.
-   * @param {string} masterPassword 
-   * @param {Object} metadata The salt, wrappedMaster, and kdfParams from the sheet
-   * @param {Array} entries The encrypted entries from the sheet
+   * Initialize local storage from a cloud vault's key material and test decryption.
+   * @param {string} masterPassword
+   * @param {Object} metadata The salt, wrappedMaster, and kdfParams from the cloud
+   * @param {Array} entries The encrypted entries from the cloud
    */
   async restoreFromRemote(masterPassword, metadata, entries) {
     if (!metadata || !metadata.salt || !metadata.wrappedMaster) {
@@ -176,8 +176,7 @@ export class Vault {
       await this.storage.set({ [STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS]: newFails });
       
       if (newFails >= SECURITY.MAX_FAILED_UNLOCKS) {
-        const keys = [...Object.values(STORAGE_KEYS), ...Object.keys(LEGACY_STORAGE_KEYS)];
-        await this.storage.remove(keys);
+        await this.storage.remove([...Object.values(STORAGE_KEYS)]);
         throw new DecryptionError(`Too many incorrect attempts. Vault has been completely wiped for security.`);
       } else if (newFails >= SECURITY.WARN_FAILED_UNLOCKS) {
         throw new DecryptionError(`Incorrect master PIN. WARNING: ${SECURITY.MAX_FAILED_UNLOCKS - newFails} attempts remaining before vault is wiped!`);

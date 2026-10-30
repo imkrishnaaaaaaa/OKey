@@ -4,7 +4,7 @@
     "description": "The name of the extension."
   },
   "appDescription": {
-    "message": "A premium zero-knowledge password & 2FA manager backed by your own Google Sheet.",
+    "message": "A premium zero-knowledge password & 2FA manager. Your vault, encrypted on your devices.",
     "description": "The extension store description."
   }
 }

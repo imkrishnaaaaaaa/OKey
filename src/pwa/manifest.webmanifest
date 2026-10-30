@@ -1,7 +1,7 @@
 {
   "name": "OKey — Password Manager",
   "short_name": "OKey",
-  "description": "Privacy-first, zero-knowledge password & 2FA manager backed by your own Google Sheet.",
+  "description": "Privacy-first, zero-knowledge password & 2FA manager. Your vault, encrypted on your devices.",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

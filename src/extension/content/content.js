@@ -10,7 +10,7 @@
  */
 
 import { generatePassword } from '../../core/password-generator.js';
-import { generateTOTP, isValidTotpSecret } from '../../core/totp.js';
+import { isValidTotpSecret } from '../../core/totp.js';
 import { MSG } from '../lib/messages.js';
 
 const BADGE = 'okey-badge';
@@ -23,27 +23,40 @@ let activeSessionCred = null;
 let activeSessionTime = 0;
 let singleMatchAttempted = false;
 
+/** A field is only "visible" if laid out, opaque, and not 1px-hidden. */
+function isVisiblyFillable(el) {
+  if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') return false;
+  const r = el.getBoundingClientRect();
+  if (r.width < 20 || r.height < 8) return false;
+  const style = getComputedStyle(el);
+  if (Number(style.opacity) === 0 || style.visibility === 'hidden' || style.display === 'none') return false;
+  return true;
+}
+
 async function triggerSingleMatchAutofill() {
   if (singleMatchAttempted || activeSessionCred) return;
-  
+
   const inputs = [...document.querySelectorAll('input')];
-  const anchorEl = inputs.find(el => (isUsernameField(el) || isPasswordField(el)) && el.offsetParent !== null && !el.value);
+  const anchorEl = inputs.find(el => (isUsernameField(el) || isPasswordField(el)) && isVisiblyFillable(el) && !el.value);
   if (!anchorEl) return;
-  
+
   singleMatchAttempted = true;
-  
-  const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS, url: location.href }).catch(() => null);
+
+  const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS }).catch(() => null);
   if (res && !res.locked && res.matches && res.matches.length === 1) {
     const cred = res.matches[0];
-    fillAndRememberCredential(anchorEl, cred);
+    // Never silently fill an invisible field (revamp H8).
+    if (isVisiblyFillable(anchorEl)) {
+      fillAndRememberCredential(anchorEl, cred);
+    }
   }
 }
 
 const SVG_KEY =
   '<svg viewBox="0 0 24 24" fill="none" width="13" height="13">' +
-  '<rect x="3" y="10" width="18" height="11" rx="3.5" stroke="#6d5efc" stroke-width="2"/>' +
-  '<path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#6d5efc" stroke-width="2"/>' +
-  '<circle cx="12" cy="15.5" r="1.4" fill="#6d5efc"/>' +
+  '<path d="M8.3 10.6V7.2a3.7 3.7 0 0 1 7.4 0v3.4" stroke="#6d5efc" stroke-width="1.9" stroke-linecap="round"/>' +
+  '<circle cx="12" cy="15.4" r="5.6" stroke="#6d5efc" stroke-width="2"/>' +
+  '<circle cx="12" cy="14.4" r="1.2" fill="#6d5efc"/>' +
   '</svg>';
 
 function isPasswordField(el) {
@@ -174,7 +187,15 @@ function repositionAll() {
 function attach(el) {
   if (tracked.has(el) || el.dataset.okeyIgnore) return;
   if (isButtonLike(el)) return;
-  if (!isPasswordField(el) && !isUsernameField(el) && !isTotpField(el)) return;
+
+  // NEVER badge one-time-code inputs — filling happens as part of the
+  // credential fill, and a lock icon on an OTP box is pure noise (owner ask).
+  if (isTotpField(el)) { el.dataset.okeyIgnore = '1'; return; }
+
+  // Usernames only matter inside forms that also hold a password —
+  // this excludes search bars, newsletter boxes, comment fields.
+  if (!isPasswordField(el) && !hasPasswordSibling(el)) return;
+
   tracked.set(el, null); // placeholder; updated below
 
   // Prevent browser's native password/autofill manager popup from overlapping
@@ -210,7 +231,13 @@ function attach(el) {
     const shouldShow = document.activeElement === el || el.value === '' || isUsernameField(el) || isTotpField(el);
     badge.style.display = shouldShow ? 'flex' : 'none';
 
-    // Single match autofill check
+    // Visibility discipline: quiet until the field earns attention.
+    const focused = document.activeElement === el || el.contains(document.activeElement);
+    const hovered = el.matches(':hover') || badge.matches(':hover');
+    const peekGenerate = isPasswordField(el) && !el.value && formInteracted(el);
+    badge.classList.toggle('okey-badge-live', focused || hovered || peekGenerate);
+
+    // Single-match autofill still respects visibility rules upstream.
     if (settings.autoFillSingleMatch && !singleMatchAttempted && !activeSessionCred) {
       triggerSingleMatchAutofill();
     }
@@ -221,7 +248,7 @@ function attach(el) {
   repositionRegistry.add(reposition);
 
   const show = () => { reposition(); };
-  const hideSoon = () => setTimeout(() => { if (document.activeElement !== el && !badge.matches(':hover')) badge.style.display = 'none'; }, 150);
+  const hideSoon = () => setTimeout(() => reposition(), 150);
 
   el.addEventListener('focus', show);
   el.addEventListener('blur', hideSoon);
@@ -243,6 +270,7 @@ function attach(el) {
   removalObserver.observe(document, { childList: true, subtree: true });
 
   badge.addEventListener('mousedown', (e) => e.preventDefault());
+  badge.classList.add('okey-badge');
   badge.addEventListener('click', async (e) => {
     e.stopPropagation();
     openPanel(el, badge);
@@ -259,15 +287,11 @@ function attach(el) {
         setTimeout(() => submitForm(el), 150);
       }
     } else if (isTotpField(el) && !el.value) {
-      if (activeSessionCred.totpSecret && isValidTotpSecret(activeSessionCred.totpSecret)) {
-        generateTOTP(activeSessionCred.totpSecret).then(({ code }) => {
-          if (code) {
-            setValue(el, code);
-            if (settings.autoSubmitEnabled) {
-              setTimeout(() => submitForm(el), 150);
-            }
-          }
-        }).catch(console.error);
+      if (activeSessionCred.totpCode) {
+        setValue(el, activeSessionCred.totpCode);
+        if (settings.autoSubmitEnabled) {
+          setTimeout(() => submitForm(el), 150);
+        }
       }
     }
   }
@@ -285,8 +309,8 @@ function fillGenerated(passwordEl) {
 
 async function openPanel(anchorEl, badge) {
   closePanel();
-  const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS, url: location.href }).catch(() => null);
-  
+  const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS }).catch(() => null);
+
   if (res && res.settings) {
     settings = { ...settings, ...res.settings };
   }
@@ -302,74 +326,37 @@ async function openPanel(anchorEl, badge) {
   if (!res || res.locked) {
     panelEl.appendChild(header('OKey is locked'));
 
+    // Master PIN entry happens in an extension-owned cross-origin iframe:
+    // page scripts cannot read or overlay it (revamp H4).
     const container = document.createElement('div');
     container.className = 'okey-panel-lock-container';
-    container.style.cssText = 'padding: 12px 10px; display: flex; flex-direction: column; gap: 10px;';
-
-    const labelEl = document.createElement('div');
-    labelEl.className = 'okey-panel-sub';
-    labelEl.textContent = 'Enter master PIN to unlock';
-    labelEl.style.cssText = 'text-align: center; margin-bottom: 4px; font-weight: 500;';
-    container.appendChild(labelEl);
-
-    const pinInput = document.createElement('input');
-    pinInput.type = 'password';
-    pinInput.placeholder = 'Enter PIN';
-    pinInput.inputMode = 'numeric';
-    pinInput.pattern = '[0-9]*';
-    pinInput.maxLength = 4;
-    pinInput.style.cssText = `
-      width: calc(100% - 24px);
-      margin-left: 12px;
-      padding: 10px 12px;
-      background: var(--okey-bg-elev-2, #222);
-      border: 1px solid var(--okey-brand, #00e676);
-      border-radius: 8px;
-      color: var(--okey-text, #fff);
-      font-size: 14px;
-      outline: none;
-      box-sizing: border-box;
-      letter-spacing: 0.5em;
-      text-align: center;
-    `;
-
-    container.appendChild(pinInput);
-
-    const errMsg = document.createElement('div');
-    errMsg.style.cssText = 'font-size: 11px; color: var(--okey-danger, #f95766); display: none; text-align: center; margin-top: 4px;';
-    container.appendChild(errMsg);
-
+    const frame = document.createElement('iframe');
+    frame.className = 'okey-unlock-frame';
+    frame.src = chrome.runtime.getURL('unlock/unlock.html');
+    frame.setAttribute('title', 'OKey unlock');
+    frame.style.cssText = 'width:100%;height:150px;border:0;background:transparent;display:block;';
+    container.appendChild(frame);
     panelEl.appendChild(container);
 
-    const doUnlock = async () => {
-      const pin = pinInput.value;
-      if (pin.length < 4) return;
-      pinInput.disabled = true;
-      errMsg.style.display = 'none';
-
-      const unlockRes = await chrome.runtime.sendMessage({ type: MSG.UNLOCK_VAULT, pin }).catch(() => null);
-      if (unlockRes && unlockRes.success) {
+    frame.addEventListener('load', () => {
+      try { frame.contentWindow.focus(); } catch (e) {}
+    });
+    const onUnlockMsg = (ev) => {
+      if (ev.source !== frame.contentWindow) return;
+      if (ev.data?.type === 'okey-unlock-success') {
+        window.removeEventListener('message', onUnlockMsg);
+        closePanel();
         openPanel(anchorEl, badge);
-      } else {
-        pinInput.disabled = false;
-        errMsg.textContent = unlockRes?.error || 'Incorrect PIN';
-        errMsg.style.display = 'block';
-        pinInput.value = '';
-        pinInput.focus();
       }
     };
+    window.addEventListener('message', onUnlockMsg);
+    positionAndShow(badge);
+    return;
+  }
 
-    pinInput.addEventListener('input', () => {
-      pinInput.value = pinInput.value.replace(/[^0-9]/g, '').slice(0, 4);
-      if (pinInput.value.length === 4) {
-        doUnlock();
-      }
-    });
-
-    setTimeout(() => pinInput.focus(), 50);
-  } else {
-    // 1. Search bar container
-    const searchContainer = document.createElement('div');
+  // ---- Unlocked: credential picker ----
+  // 1. Search bar container
+  const searchContainer = document.createElement('div');
     searchContainer.className = 'okey-panel-search-container';
     searchContainer.style.cssText = 'padding: 6px 10px; border-bottom: 1px solid var(--okey-border, #444); display: flex;';
 
@@ -448,18 +435,23 @@ async function openPanel(anchorEl, badge) {
     }
 
     setTimeout(() => searchInput.focus(), 50);
-  }
 
+  positionAndShow(badge);
+}
+
+function onDocClick(e) { if (panelEl && !panelEl.contains(e.target)) closePanel(); }
+// Clean up panel
+function closePanel() { panelEl?.remove(); panelEl = null; }
+
+/** Anchor the panel under the badge and mount it. */
+function positionAndShow(badge) {
+  if (!panelEl) return;
   const r = badge.getBoundingClientRect();
   panelEl.style.left = `${Math.max(8, window.scrollX + r.right - 280)}px`;
   panelEl.style.top = `${window.scrollY + r.bottom + 6}px`;
   document.body.appendChild(panelEl);
   setTimeout(() => document.addEventListener('click', onDocClick, { once: true }), 0);
 }
-
-function onDocClick(e) { if (panelEl && !panelEl.contains(e.target)) closePanel(); }
-// Clean up panel
-function closePanel() { panelEl?.remove(); panelEl = null; }
 
 function escapeHtml(str) {
   if (!str) return '';
@@ -643,12 +635,10 @@ function fillCredential(anchorEl, cred) {
     : [...form.querySelectorAll('input')].find(isUsernameField);
   if (userField && cred.username) setValue(userField, cred.username);
   if (pwField && cred.password) setValue(pwField, cred.password);
-  
+
   const totpEl = [...form.querySelectorAll('input')].find(isTotpField);
-  if (totpEl && cred.totpSecret && isValidTotpSecret(cred.totpSecret)) {
-    generateTOTP(cred.totpSecret).then(({ code }) => {
-      if (code) setValue(totpEl, code);
-    }).catch(console.error);
+  if (totpEl && cred.totpCode) {
+    setValue(totpEl, cred.totpCode);
   }
   toast('Filled by OKey');
 }
@@ -710,34 +700,24 @@ function startAutofillPolling() {
     const inputs = document.querySelectorAll('input');
     for (const el of inputs) {
       if (isButtonLike(el)) continue;
-      
-      if (isPasswordField(el) && el.offsetParent !== null && !el.value) {
+
+      if (isPasswordField(el) && pollFillable(el) && !el.value) {
         setValue(el, activeSessionCred.password);
         toast('Autofilled by OKey');
         if (settings.autoSubmitEnabled) {
           setTimeout(() => submitForm(el), 150);
         }
       }
-      else if (isTotpField(el) && el.offsetParent !== null && !el.value) {
-        if (activeSessionCred.totpSecret && isValidTotpSecret(activeSessionCred.totpSecret)) {
-          const savedCred = activeSessionCred;
+      else if (isTotpField(el) && pollFillable(el) && !el.value) {
+        if (activeSessionCred.totpCode) {
+          setValue(el, activeSessionCred.totpCode);
+          toast('Autofilled by OKey');
+          chrome.runtime.sendMessage({ type: MSG.CLEAR_ACTIVE_FILLING_SESSION }).catch(() => {});
           activeSessionCred = null;
-          generateTOTP(savedCred.totpSecret).then(({ code }) => {
-            activeSessionCred = savedCred;
-            if (code && !el.value) {
-              setValue(el, code);
-              toast('Autofilled by OKey');
-              chrome.runtime.sendMessage({ type: MSG.CLEAR_ACTIVE_FILLING_SESSION }).catch(() => {});
-              activeSessionCred = null;
-              stopAutofillPolling();
-              if (settings.autoSubmitEnabled) {
-                setTimeout(() => submitForm(el), 150);
-              }
-            }
-          }).catch((err) => {
-            activeSessionCred = savedCred;
-            console.error(err);
-          });
+          stopAutofillPolling();
+          if (settings.autoSubmitEnabled) {
+            setTimeout(() => submitForm(el), 150);
+          }
         }
       }
     }
@@ -750,6 +730,36 @@ function stopAutofillPolling() {
     autofillPollInterval = null;
   }
 }
+
+
+/* A username field counts only when a password field lives in the same
+ * form (or nearest sensible container). Prevents badge spam across pages. */
+function hasPasswordSibling(el) {
+  const scope = el.form || closestContainer(el, 4);
+  return !!scope?.querySelector('input[type="password"]');
+}
+function closestContainer(el, levels) {
+  let n = el.parentElement;
+  for (let i = 0; i < levels && n; i++) {
+    if (n.querySelector?.('input[type="password"]')) return n;
+    n = n.parentElement;
+  }
+  return null;
+}
+const interactedForms = new WeakSet();
+function markFormInteracted(el) {
+  const f = el.form || closestContainer(el, 4) || document.body;
+  interactedForms.add(f);
+}
+window.addEventListener('focusin', (e) => {
+  if (e.target?.tagName === 'INPUT') markFormInteracted(e.target);
+}, true);
+function formInteracted(el) {
+  return interactedForms.has(el.form || closestContainer(el, 4) || null);
+}
+
+/* polling fills must respect the same visibility bar */
+function pollFillable(el) { return isVisiblyFillable(el) && !el.disabled && !el.readOnly; }
 
 // ---- scan & observe ----
 function scan(root = document) {

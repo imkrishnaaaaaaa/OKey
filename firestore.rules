@@ -1,0 +1,27 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Per-user vault container. Nothing outside a user's own subtree is
+    // readable or writable by anyone, ever.
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['email', 'createdAt', 'displayName']);
+      allow update: if isOwner(uid);
+      allow delete: if false; // account deletion handled out-of-band
+
+      match /vault/{docId=**} {
+        // meta / settings / entries — payload size guard on entry writes.
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && (!request.resource.data.keys().hasAny(['payload'])
+              || request.resource.data.get('payload', '').size() <= 102400);
+        allow delete: if isOwner(uid);
+      }
+    }
+  }
+}

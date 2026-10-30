@@ -1,0 +1,130 @@
+/* ============================================================================
+ * OKEY 2.2 — MOTION SYSTEM
+ * Springs for entrances, glide for transitions, expressive micro-interactions.
+ * ==========================================================================*/
+
+/* ---- View transitions: soft rise + de-blur ---- */
+@keyframes nb-view-in {
+  from { opacity: 0; transform: translateY(16px) scale(.975); filter: blur(7px); }
+  60% { filter: blur(0); }
+}
+.nb-view { animation: nb-view-in var(--dur-view) var(--glide) both; }
+.nb-view-back { animation: nb-view-in var(--dur-view) var(--glide) both; }
+
+/* ---- Staggered list rows (cap the cascade at 12) ---- */
+@keyframes nb-row-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+.nb-stagger > * {
+  animation: nb-row-in var(--dur-med) var(--spring) both;
+}
+.nb-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.nb-stagger > *:nth-child(2) { animation-delay: 40ms; }
+.nb-stagger > *:nth-child(3) { animation-delay: 80ms; }
+.nb-stagger > *:nth-child(4) { animation-delay: 120ms; }
+.nb-stagger > *:nth-child(5) { animation-delay: 160ms; }
+.nb-stagger > *:nth-child(6) { animation-delay: 200ms; }
+.nb-stagger > *:nth-child(7) { animation-delay: 240ms; }
+.nb-stagger > *:nth-child(8) { animation-delay: 280ms; }
+.nb-stagger > *:nth-child(n+9):nth-child(-n+12) { animation-delay: 320ms; }
+
+/* ---- Segmented PIN cells ---- */
+.nb-pin-group { display: flex; justify-content: center; gap: 10px; }
+.nb-pin-cell {
+  width: 54px; height: 64px;
+  padding: 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 2px solid transparent;
+  border-radius: var(--r-md);
+  caret-color: var(--accent);
+  transition:
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    box-shadow var(--dur-fast),
+    transform var(--dur-med) var(--spring);
+}
+.nb-pin-cell:focus {
+  outline: none;
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(123, 104, 238, 0.14);
+  transform: translateY(-2px);
+}
+.nb-pin-cell.filled {
+  border-color: var(--accent);
+  background: var(--purple-50);
+}
+/* sequential pulse on successful unlock */
+.nb-pin-cell.pulse { animation: nb-pulse-cell .32s var(--spring); }
+@keyframes nb-pulse-cell {
+  40% { transform: scale(1.14); box-shadow: 0 0 0 6px rgba(123, 104, 238, 0.18); border-color: var(--accent); }
+}
+
+/* wrong-PIN shake */
+.nb-shake { animation: nb-shake .4s var(--glide); }
+@keyframes nb-shake {
+  15% { transform: translateX(-7px); }
+  35% { transform: translateX(7px); }
+  55% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+/* ---- Rolling digits for TOTP codes & counters ---- */
+.nb-roll {
+  display: inline-block;
+  animation: nb-roll .38s var(--spring);
+  font-variant-numeric: tabular-nums;
+}
+@keyframes nb-roll {
+  from { opacity: .25; transform: translateY(42%) rotateX(35deg); }
+}
+
+/* ---- Unlock success flare ---- */
+@keyframes nb-flare {
+  30% { box-shadow: 0 0 0 8px rgba(123, 104, 238, 0.12), 0 0 60px rgba(123, 104, 238, 0.25); }
+}
+.nb-flare { animation: nb-flare .7s var(--glide); }
+
+/* ---- Copy checkmark morph ---- */
+@keyframes nb-pop-check { from { transform: scale(.4); opacity: 0; } }
+.nb-pop-check { animation: nb-pop-check var(--dur-fast) var(--spring); }
+
+/* ---- Logo bloom (auth/welcome hero) ---- */
+@keyframes nb-bloom {
+  from { opacity: 0; transform: scale(.6) rotate(-8deg); filter: blur(6px); }
+  60% { filter: blur(0); }
+}
+.nb-bloom { animation: nb-bloom .7s var(--spring) both; }
+
+/* ---- Breathing glow for primary hero elements ---- */
+@keyframes nb-breathe {
+  0%, 100% { box-shadow: 0 6px 18px rgba(123, 104, 238, 0.28); }
+  50% { box-shadow: 0 8px 30px rgba(123, 104, 238, 0.45); }
+}
+.nb-breathe { animation: nb-breathe 3.2s ease-in-out infinite; }
+
+/* ---- Spinning sync glyph ---- */
+.nb-spin { animation: nb-rotate .8s linear infinite; }
+@keyframes nb-rotate { to { transform: rotate(360deg); } }
+
+/* ---- Tour slide transitions ---- */
+@keyframes nb-slide-next {
+  from { opacity: 0; transform: translateX(36px); }
+}
+@keyframes nb-slide-prev {
+  from { opacity: 0; transform: translateX(-36px); }
+}
+.nb-slide-next { animation: nb-slide-next var(--dur-view) var(--glide) both; }
+.nb-slide-prev { animation: nb-slide-prev var(--dur-view) var(--glide) both; }
+
+/* ---- Progress ring default transition ---- */
+.totp-ring .prog { transition: stroke-dashoffset .95s linear; }
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora span { animation: none !important; }
+}

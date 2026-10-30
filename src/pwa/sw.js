@@ -6,15 +6,25 @@
  * are never cached.
  */
 
-const CACHE = 'okey-shell-v1';
+import { APP } from '../core/constants.js';
+
+// Cache name stamped with app version so every release busts the shell cache.
+const CACHE = `okey-shell-${APP.VERSION}`;
 const SHELL = [
   './',
   './index.html',
   './app.js',
   './app.css',
   './manifest.webmanifest',
-  './styles/design-tokens.css',
-  './styles/components.css',
+  './styles/nebula/tokens.css',
+  './styles/nebula/aurora.css',
+  './styles/nebula/components.css',
+  './styles/nebula/motion.css',
+  './styles/nebula/showpiece.css',
+  './styles/nebula/screens.css',
+  './fonts/Nunito-var-latin.woff2',
+  './fonts/Inter-var-latin.woff2',
+  './fonts/JetBrainsMono-var-latin.woff2',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
@@ -39,8 +49,10 @@ self.addEventListener('fetch', (e) => {
       cached ||
       fetch(e.request)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+          }
           return res;
         })
         .catch(() => caches.match('./index.html')),

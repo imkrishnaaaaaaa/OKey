@@ -66,8 +66,11 @@ async function buildExtension() {
   await copyTree('src/extension/icons', path.join(out, 'icons'));
   await copyTree('src/extension/popup/popup.html', path.join(out, 'popup/popup.html'));
   await copyTree('src/extension/popup/popup.css', path.join(out, 'popup/popup.css'));
+  await copyTree('src/extension/unlock/unlock.html', path.join(out, 'unlock/unlock.html'));
+  await copyTree('src/extension/unlock/unlock.js', path.join(out, 'unlock/unlock.js'));
   await copyTree('src/extension/content/content.css', path.join(out, 'content/content.css'));
   await copyTree('styles', path.join(out, 'styles'));
+  await copyTree('src/pwa/fonts', path.join(out, 'fonts'));
 
   if (watch) {
     await ctx.watch();
@@ -105,6 +108,7 @@ async function buildPwa() {
   await copyTree('src/pwa/app.css', path.join(out, 'app.css'));
   await copyTree('src/pwa/manifest.webmanifest', path.join(out, 'manifest.webmanifest'));
   await copyTree('src/pwa/icons', path.join(out, 'icons'));
+  await copyTree('src/pwa/fonts', path.join(out, 'fonts'));
   await copyTree('styles', path.join(out, 'styles'));
 
   if (watch) {

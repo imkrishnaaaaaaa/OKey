@@ -123,14 +123,23 @@ export function matchDomain(url, entries) {
   for (const entry of entries) {
     if (!entry || !entry.domain) continue;
     const entryDomain = normalizeDomain(entry.domain);
+    // A dotless entry domain ("com") would match every site under that TLD —
+    // only "localhost" is a legitimate dotless host (revamp M8).
+    if (!entryDomain.includes('.') && entryDomain !== 'localhost') continue;
     let confidence = 0;
 
-    // Highest precedence: explicit path pattern match.
+    // Highest precedence: explicit path pattern match. The pattern's host
+    // part must actually belong to the current site, so "site.com*" can
+    // never bless "site.com.evil.com" (revamp M8).
     if (Array.isArray(entry.matchPatterns)) {
       for (const pat of entry.matchPatterns) {
         const normPat = pat.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
-        if (globToRegExp(normPat).test(hostPath)) {
+        const patHost = normPat.split('/')[0].replace(/\*/g, '') || '';
+        const patRoot = extractDomain(patHost);
+        const sameSite = patRoot && (patRoot === root || hostname.endsWith('.' + patRoot));
+        if (sameSite && globToRegExp(normPat).test(hostPath)) {
           confidence = Math.max(confidence, 100);
+          break;
         }
       }
     }

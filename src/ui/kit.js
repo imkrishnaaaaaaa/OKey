@@ -46,27 +46,71 @@ export function toast(msg, type = 'info', ms = 2400) {
 }
 
 /* ---------- clipboard ---------- */
+// How long a copied value stays on the clipboard, and who else clears it.
+// `seconds` reads the user's setting live. The extension adds `remote`, because
+// its popup closes when the user switches to the site to paste, taking this timer with it.
+let clipboardPolicy = { seconds: () => 30, remote: null };
+let clipboardTimer = null;
+
+export function setClipboardPolicy(policy) {
+  clipboardPolicy = { ...clipboardPolicy, ...policy };
+}
+
+function scheduleClipboardClear(text) {
+  clearTimeout(clipboardTimer);
+  const secs = clipboardPolicy.seconds();
+  try { clipboardPolicy.remote?.(text, secs); } catch { /* the page timer below still runs */ }
+  clipboardTimer = setTimeout(async () => {
+    try {
+      // Leave it alone if the user copied something else since.
+      if ((await navigator.clipboard.readText()) !== text) return;
+    } catch { /* reading may be refused. Clear anyway. */ }
+    try { await navigator.clipboard.writeText(''); } catch { /* nothing more to do */ }
+  }, secs * 1000);
+}
+
 export async function copyValue(text, label = 'Copied') {
   try {
     await navigator.clipboard.writeText(text);
     buzz(12);
     toast(label, 'success');
+    scheduleClipboardClear(text);
   } catch {
     toast('Copy failed', 'error');
   }
 }
 
 /* ---------- modal / confirm ---------- */
-export function openModal(children, { danger = false } = {}) {
+let activeClose = null; // closes the dialog that is open right now, if any
+
+/** Close the open dialog. Does nothing when none is open. */
+export function closeModal() { activeClose?.(); }
+
+/** Is a dialog open right now? */
+export const isModalOpen = () => activeClose !== null;
+
+/**
+ * Show one dialog. Opening a new one closes the old one first.
+ * @param {Array} children
+ * @param {{ onClose?: () => void }} [opts] onClose runs once however it closes:
+ *   close(), Escape, a click outside, or another dialog taking its place.
+ */
+export function openModal(children, { onClose } = {}) {
   closeModal();
   const ov = h('div', { class: 'nb-overlay' });
   const box = h('div', { class: 'nb-modal', role: 'dialog', 'aria-modal': 'true' },
     ...children);
   const onKey = (e) => { if (e.key === 'Escape') done(); };
+  let closed = false;
   function done() {
+    if (closed) return;
+    closed = true;
     document.removeEventListener('keydown', onKey);
     ov.remove();
+    if (activeClose === done) activeClose = null;
+    onClose?.();
   }
+  activeClose = done;
   document.addEventListener('keydown', onKey);
   ov.addEventListener('click', (e) => { if (e.target === ov) done(); });
   ov.append(box);
@@ -74,17 +118,16 @@ export function openModal(children, { danger = false } = {}) {
   return { close: done, el: box };
 }
 
+/** Resolves true on Confirm. Any other way of closing it resolves false. */
 export function confirmModal(message, { danger = false, confirmLabel = 'Confirm' } = {}) {
   return new Promise((resolve) => {
     const m = openModal([
       h('div', { style: { lineHeight: '1.55', marginBottom: '16px' }, text: message }),
       h('div', { class: 'nb-row', style: { gap: '10px' } },
-        h('button', { class: 'nb-btn nb-btn-ghost nb-spacer', text: 'Cancel',
-          onclick: () => { m.close(); resolve(false); } }),
+        h('button', { class: 'nb-btn nb-btn-ghost nb-spacer', text: 'Cancel', onclick: () => m.close() }),
         h('button', { class: 'nb-btn ' + (danger ? 'nb-btn-danger' : 'nb-btn-primary') + ' nb-spacer', text: confirmLabel,
-          onclick: () => { m.close(); resolve(true); } })),
-    ]);
-    void danger;
+          onclick: () => { resolve(true); m.close(); } })),
+    ], { onClose: () => resolve(false) });
   });
 }
 
@@ -217,13 +260,22 @@ export function dropdown({ options, value, onchange, placeholder = 'Select…' }
       ));
   }
   function set(v) { value = v; displayLabel.textContent = label(); renderMenu(); onchange?.(v); }
+  // Listen on the document only while the menu is open. A listener that is added
+  // once and never removed keeps this whole screen (and any password field on it) alive.
+  function onDocClick(e) {
+    if (!wrap.isConnected || !wrap.contains(e.target)) toggle(false);
+  }
   function toggle(force) {
     open = force ?? !open;
-    if (open) { renderMenu(); menu.hidden = false; wrap.classList.add('open'); }
-    else { menu.hidden = true; wrap.classList.remove('open'); }
+    if (open) {
+      renderMenu(); menu.hidden = false; wrap.classList.add('open');
+      document.addEventListener('click', onDocClick);
+    } else {
+      menu.hidden = true; wrap.classList.remove('open');
+      document.removeEventListener('click', onDocClick);
+    }
   }
   display.addEventListener('click', () => toggle());
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) toggle(false); });
   const wrap = h('div', { class: 'nb-select' }, display, menu);
   renderMenu();
   return { el: wrap, get value() { return value; }, set };

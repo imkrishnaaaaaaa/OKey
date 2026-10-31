@@ -45,11 +45,3 @@ export class ValidationError extends OKeyError {
     this.name = 'ValidationError';
   }
 }
-
-/** Network / transport layer failure during sync. */
-export class SyncError extends OKeyError {
-  constructor(message = 'Sync failed', code = 'SYNC_ERROR') {
-    super(message, code);
-    this.name = 'SyncError';
-  }
-}

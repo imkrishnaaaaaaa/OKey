@@ -5,18 +5,24 @@
  * confidently they match the current page. Supports optional glob URL
  * `matchPatterns` for path-scoped matches (e.g. "site.com/admin/*").
  *
- * A full Public Suffix List is ~240KB; instead we ship a compact set of common
- * multi-level suffixes which covers the long tail of real-world logins without
- * the bundle cost. Unknown suffixes fall back to the last two labels.
+ * The registrable domain comes from the Public Suffix List (tldts) with private
+ * suffixes on, so hosting domains such as github.io or vercel.app count as
+ * suffixes. Without that, one user's site would look like the same site as
+ * another user's and be offered their login.
  */
 
-/** Common multi-level public suffixes (registrable domain = suffix + 1 label). */
-const MULTI_LEVEL_SUFFIXES = new Set([
-  'co.uk', 'org.uk', 'me.uk', 'gov.uk', 'ac.uk', 'co.jp', 'or.jp', 'ne.jp', 'co.kr',
-  'com.au', 'net.au', 'org.au', 'gov.au', 'edu.au', 'co.nz', 'org.nz', 'govt.nz',
-  'com.br', 'com.cn', 'com.tr', 'com.mx', 'com.ar', 'com.sg', 'com.hk', 'com.tw',
-  'co.in', 'co.za', 'co.id', 'co.il', 'com.sa', 'com.ua', 'co.th', 'or.th',
-]);
+import { parse } from 'tldts';
+
+const PSL = { allowPrivateDomains: true };
+
+/**
+ * Registrable domain of a lowercase hostname. IPs and localhost are their own
+ * domain. Null when the host is itself a public suffix (github.io, co.uk, com).
+ */
+function registrable(hostname) {
+  if (hostname === 'localhost' || hostname.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return hostname;
+  return parse(hostname, PSL).domain;
+}
 
 /**
  * Extract the registrable domain (eTLD+1) from a URL or hostname.
@@ -33,15 +39,7 @@ export function extractDomain(input) {
   }
   hostname = hostname.toLowerCase().replace(/\.$/, '');
   if (!hostname) return null;
-  // IPv4 / IPv6 / localhost → return as-is.
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':') || hostname === 'localhost') {
-    return hostname;
-  }
-  const parts = hostname.split('.');
-  if (parts.length <= 2) return hostname;
-  const lastTwo = parts.slice(-2).join('.');
-  if (MULTI_LEVEL_SUFFIXES.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
-  return lastTwo;
+  return registrable(hostname) ?? hostname;
 }
 
 /**
@@ -60,28 +58,13 @@ export function normalizeDomain(input) {
   return host.replace(/^www\./, '').replace(/\.$/, '').trim();
 }
 
-/** Friendly hostname for display. */
+/** Friendly hostname for display: the subdomain plus the name, without the suffix. */
 export function getDisplayDomain(url) {
   try {
-    let host = new URL(url.includes('://') ? url : 'https://' + url).hostname.toLowerCase();
-    host = host.replace(/^www\./, '').replace(/\.$/, '');
-    
-    const parts = host.split('.');
-    if (parts.length <= 2) return host;
-
-    const lastTwo = parts.slice(-2).join('.');
-    if (MULTI_LEVEL_SUFFIXES.has(lastTwo)) {
-      if (parts.length >= 4) {
-        return parts.slice(0, -2).join('.');
-      }
-      return host;
-    }
-
-    if (parts.length >= 3) {
-      return parts.slice(0, -1).join('.');
-    }
-
-    return host;
+    const host = new URL(url.includes('://') ? url : 'https://' + url).hostname.toLowerCase()
+      .replace(/^www\./, '').replace(/\.$/, '');
+    const { subdomain, domainWithoutSuffix } = parse(host, PSL);
+    return subdomain && domainWithoutSuffix ? `${subdomain}.${domainWithoutSuffix}` : host;
   } catch {
     return url;
   }
@@ -126,6 +109,9 @@ export function matchDomain(url, entries) {
     // A dotless entry domain ("com") would match every site under that TLD —
     // only "localhost" is a legitimate dotless host (revamp M8).
     if (!entryDomain.includes('.') && entryDomain !== 'localhost') continue;
+    // A login saved on a shared suffix itself ("github.io") would be offered on
+    // every site under it. Skip it, like the dotless case above.
+    if (registrable(entryDomain) === null) continue;
     let confidence = 0;
 
     // Highest precedence: explicit path pattern match. The pattern's host
@@ -135,7 +121,7 @@ export function matchDomain(url, entries) {
       for (const pat of entry.matchPatterns) {
         const normPat = pat.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
         const patHost = normPat.split('/')[0].replace(/\*/g, '') || '';
-        const patRoot = extractDomain(patHost);
+        const patRoot = patHost ? registrable(patHost) : null;
         const sameSite = patRoot && (patRoot === root || hostname.endsWith('.' + patRoot));
         if (sameSite && globToRegExp(normPat).test(hostPath)) {
           confidence = Math.max(confidence, 100);

@@ -2,14 +2,15 @@
  * OKey PWA — Service worker (offline app shell)
  *
  * Cache-first for the app shell so OKey opens and the local vault works fully
- * offline. Sync requests (to script.google.com) always go to the network and
- * are never cached.
+ * offline. Requests to other origins (Firebase, Google) always go to the
+ * network and are never cached.
  */
 
-import { APP } from '../core/constants.js';
-
-// Cache name stamped with app version so every release busts the shell cache.
-const CACHE = `okey-shell-${APP.VERSION}`;
+// build.mjs replaces __BUILD_ID__ with a hash of the built files. Any change to
+// the app gives a new cache name, so installed copies cannot stay on old code.
+// ('dev' only appears when this file runs without the build.)
+const BUILD_ID = typeof __BUILD_ID__ !== 'undefined' ? __BUILD_ID__ : 'dev';
+const CACHE = `okey-shell-${BUILD_ID}`;
 const SHELL = [
   './',
   './index.html',
@@ -30,7 +31,9 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache, so a new release is never
+  // filled from a stale copy of the old files.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

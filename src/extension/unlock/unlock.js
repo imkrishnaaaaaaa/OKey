@@ -25,7 +25,8 @@ async function submit() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'UNLOCK_VAULT', pin: pin.value });
     if (res?.success) {
-      parent.postMessage({ type: 'okey-unlock-success' }, '*');
+      // Tell only the page that embeds this frame, not any window that might be listening.
+      parent.postMessage({ type: 'okey-unlock-success' }, location.ancestorOrigins?.[0] || '*');
       return;
     }
     err.textContent = res?.error || 'Incorrect PIN';

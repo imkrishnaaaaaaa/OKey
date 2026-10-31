@@ -43,6 +43,9 @@ export class Vault {
     /** @type {Uint8Array|null} */ this._dek = null;
     /** @type {CryptoKey|null} */ this._dekKey = null;
     /** @type {import('./schema.js').VaultEntry[]} */ this._entries = [];
+    /** id -> at-rest record we could not decrypt. Kept and written back so a save never erases them. */
+    this._undecryptable = new Map();
+    this._undecryptableNotice = 0;
     this._unlocked = false;
     /** @type {Uint8Array|null} */ this._salt = null;
     this._kdfParams = null;
@@ -108,43 +111,49 @@ export class Vault {
   }
 
   /**
-   * Initialize local storage from a cloud vault's key material and test decryption.
-   * @param {string} masterPassword
-   * @param {Object} metadata The salt, wrappedMaster, and kdfParams from the cloud
-   * @param {Array} entries The encrypted entries from the cloud
+   * New-device restore. Opens a cloud vault with the 24 recovery words, then
+   * seals the same key under a new local PIN (same salt and KDF params, so the
+   * recovery wrap stays valid). Nothing is written if the words or PIN are bad.
+   * @param {string} mnemonic the 24 recovery words
+   * @param {string} newPin PIN for this device only; the cloud never sees it
+   * @param {{salt:string,kdfParams:Object,wrappedRecovery:string,formatVersion?:number}} metadata cloud meta
+   * @param {Array} entries at-rest records from the cloud
    */
-  async restoreFromRemote(masterPassword, metadata, entries) {
-    if (!metadata || !metadata.salt || !metadata.wrappedMaster) {
-      throw new ValidationError('Remote vault does not contain valid key material');
+  async restoreWithRecovery(mnemonic, newPin, metadata, entries) {
+    if (!metadata?.salt || !metadata?.wrappedRecovery) {
+      throw new ValidationError('The cloud vault has no recovery key');
     }
-    
+    assertStrongPassword(newPin);
+
     const salt = base64ToBytes(metadata.salt);
-    const kdfParams = metadata.kdfParams;
-    const { kek } = await deriveKek(masterPassword, salt, kdfParams);
-    
+    const recoveryKek = await deriveRecoveryKek(mnemonic, salt);
     let dek;
     try {
-      dek = await unwrapKeyMaterial(metadata.wrappedMaster, kek);
-    } catch (e) {
-      secureWipe(kek);
-      throw new DecryptionError('Incorrect master password for the remote vault');
+      dek = await unwrapKeyMaterial(metadata.wrappedRecovery, recoveryKek);
+    } catch {
+      throw new DecryptionError('Recovery key did not match this vault');
+    } finally {
+      secureWipe(recoveryKek);
     }
+
+    const { kek, kdfParams } = await deriveKek(newPin, salt, metadata.kdfParams);
+    const wrappedMaster = await wrapKeyMaterial(dek, kek);
     secureWipe(kek);
-    
+
     this._dek = dek;
     this._dekKey = await importAesKey(dek, false);
     this._salt = salt;
     this._kdfParams = kdfParams;
-    this._unlocked = true;
     this._payloadCache.clear();
-    
     this._entries = await this._decryptRecords(entries || []);
-    
+    this._unlocked = true;
+
     await this.storage.set({
       [STORAGE_KEYS.VAULT_SALT]: metadata.salt,
       [STORAGE_KEYS.KDF_PARAMS]: kdfParams,
-      [STORAGE_KEYS.WRAPPED_BY_MASTER]: metadata.wrappedMaster,
-      [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: metadata.wrappedRecovery || '',
+      [STORAGE_KEYS.WRAPPED_BY_MASTER]: wrappedMaster,
+      [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: metadata.wrappedRecovery,
+      [STORAGE_KEYS.RECOVERY_VERSION]: Number(metadata.recoveryVersion) || 1,
       [STORAGE_KEYS.VAULT_DATA]: entries || [],
       [STORAGE_KEYS.VAULT_METADATA]: { formatVersion: metadata.formatVersion || APP.VAULT_FORMAT_VERSION, createdAt: nowIso() },
       [STORAGE_KEYS.SETUP_COMPLETE]: true,
@@ -161,7 +170,9 @@ export class Vault {
     const c = await this._loadContainer();
     if (!c.salt || !c.wrappedMaster) throw new ValidationError('Vault is not initialized');
 
-    const fails = (await this.storage.get(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS)) || 0;
+    // storage.get returns an object keyed by name, so read the number out of it.
+    const failKey = STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS;
+    const fails = Number((await this.storage.get(failKey))[failKey]) || 0;
     if (fails >= SECURITY.MAX_FAILED_UNLOCKS) {
       throw new Error(`Too many incorrect attempts. Vault has been reset for your security.`);
     }
@@ -218,6 +229,8 @@ export class Vault {
     this._dek = null;
     this._dekKey = null;
     this._entries = [];
+    this._undecryptable.clear();
+    this._undecryptableNotice = 0;
     this._salt = null;
     this._kdfParams = null;
     this._payloadCache.clear();
@@ -253,12 +266,15 @@ export class Vault {
       throw new DecryptionError('Recovery key did not match this vault');
     }
     secureWipe(recoveryKek);
+    // The 24 words prove ownership, so earlier wrong PINs no longer count.
+    await this.storage.remove(STORAGE_KEYS.FAILED_UNLOCK_ATTEMPTS);
     await this._activateWithDek(dek, c);
   }
 
   /**
-   * Set a new master password (vault must be unlocked). Re-wraps the DEK under a
-   * fresh salt; entry ciphertext is untouched.
+   * Set a new master password (vault must be unlocked). Re-wraps the DEK under
+   * the new password, keeping the same salt and KDF params: the recovery wrap is
+   * bound to the salt, so a new salt would break it. Entry ciphertext is untouched.
    * @param {string} newPassword
    */
   async changeMasterPassword(newPassword) {
@@ -279,18 +295,54 @@ export class Vault {
   }
 
   /**
-   * Regenerate the recovery key (vault must be unlocked). Returns the new
-   * mnemonic to display once. Invalidates any previous recovery key.
-   * @returns {Promise<{ recoveryMnemonic: string }>}
+   * Make a new recovery key WITHOUT activating it. Nothing is written until
+   * `commit()` runs. Show the words, let the user prove they saved them, and only
+   * then commit: the moment it is committed the old words stop working, and a
+   * user who closed the window in between must still have a working key.
+   * @returns {Promise<{ recoveryMnemonic: string, commit: () => Promise<void> }>}
    */
-  async regenerateRecovery() {
+  async prepareRecoveryKey() {
     this._assertUnlocked();
     const recoveryMnemonic = generateRecoveryMnemonic();
     const recoveryKek = await deriveRecoveryKek(recoveryMnemonic, this._salt);
     const wrappedRecovery = await wrapKeyMaterial(this._dek, recoveryKek);
     secureWipe(recoveryKek);
-    await this.storage.set({ [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: wrappedRecovery });
+    const commit = async () => {
+      const { [STORAGE_KEYS.RECOVERY_VERSION]: v } = await this.storage.get(STORAGE_KEYS.RECOVERY_VERSION);
+      await this.storage.set({
+        [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: wrappedRecovery,
+        [STORAGE_KEYS.RECOVERY_VERSION]: (Number(v) || 1) + 1,
+      });
+    };
+    return { recoveryMnemonic, commit };
+  }
+
+  /**
+   * Regenerate the recovery key and activate it at once (vault must be unlocked).
+   * Prefer prepareRecoveryKey() when a person has to save the words first.
+   * @returns {Promise<{ recoveryMnemonic: string }>}
+   */
+  async regenerateRecovery() {
+    const { recoveryMnemonic, commit } = await this.prepareRecoveryKey();
+    await commit();
     return { recoveryMnemonic };
+  }
+
+  /** Do these 24 words open this vault's recovery wrap? Reads only, never throws on bad words. */
+  async verifyRecoveryWords(mnemonic) {
+    const c = await this._loadContainer();
+    if (!c.salt || !c.wrappedRecovery) return false;
+    try {
+      const kek = await deriveRecoveryKek(mnemonic, c.salt);
+      try {
+        secureWipe(await unwrapKeyMaterial(c.wrappedRecovery, kek));
+        return true;
+      } finally {
+        secureWipe(kek);
+      }
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -536,6 +588,7 @@ export class Vault {
       if (!remoteNewer) continue;
       const decoded = await this._recordToEntry(rec);
       if (!decoded) continue;
+      this._undecryptable.delete(rec.id);
       if (local) Object.assign(local, decoded);
       else {
         this._entries.push(decoded);
@@ -567,14 +620,26 @@ export class Vault {
   /** @private Decrypt an array of at-rest records into full entries. */
   async _decryptRecords(records) {
     const out = [];
+    this._undecryptable.clear();
     for (const rec of records) {
       const entry = await this._recordToEntry(rec);
       if (entry) {
         out.push(entry);
         this._payloadCache.set(entry.id, { version: entry.version, record: rec });
+      } else if (rec?.id) {
+        this._undecryptable.set(rec.id, rec);
       }
     }
+    this._undecryptableNotice = this._undecryptable.size;
+    if (this._undecryptable.size) console.warn(`[okey] ${this._undecryptable.size} record(s) could not be decrypted and were kept as they are`);
     return out;
+  }
+
+  /** How many unreadable records were found at unlock. Returns the count once, then 0. */
+  takeUndecryptableNotice() {
+    const n = this._undecryptableNotice;
+    this._undecryptableNotice = 0;
+    return n;
   }
 
   /** @private */
@@ -598,7 +663,7 @@ export class Vault {
         nowIso,
       );
     } catch {
-      // A record we cannot decrypt is skipped rather than crashing the whole unlock.
+      // Skipped here so one bad record cannot block unlock. _decryptRecords keeps it.
       return null;
     }
   }
@@ -625,6 +690,7 @@ export class Vault {
       this._payloadCache.set(e.id, { version: e.version, record: rec });
     }
     for (const id of this._payloadCache.keys()) if (!liveIds.has(id)) this._payloadCache.delete(id);
+    for (const [id, rec] of this._undecryptable) if (!liveIds.has(id)) records.push(rec);
     await this.storage.set({ [STORAGE_KEYS.VAULT_DATA]: records });
   }
 
@@ -651,9 +717,9 @@ function withMeta(entry, payload) {
 /** Fields that go into the encrypted payload (everything not cleartext metadata). */
 function payloadFields(entry) {
   const { siteName, nickname, tags, matchPatterns, isFavorite, createdAt, lastUsedAt,
-    username, password, totpSecret, notes, customFields, schemaVersion } = entry;
+    username, password, totpSecret, totpDigits, totpPeriod, totpAlgorithm, notes, customFields, schemaVersion } = entry;
   return { siteName, nickname, tags, matchPatterns, isFavorite, createdAt, lastUsedAt,
-    username, password, totpSecret, notes, customFields, schemaVersion };
+    username, password, totpSecret, totpDigits, totpPeriod, totpAlgorithm, notes, customFields, schemaVersion };
 }
 
 function assertStrongPassword(pw) {

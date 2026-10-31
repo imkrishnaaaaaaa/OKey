@@ -3,27 +3,38 @@
  */
 
 import { Vault } from '../../core/vault.js';
-import { STORAGE_KEYS, ENTRY_TYPES, DEFAULT_SETTINGS, SECURITY } from '../../core/constants.js';
-import { sanitizeSettings } from '../../core/settings.js';
+import { STORAGE_KEYS, ENTRY_TYPES, DEFAULT_SETTINGS } from '../../core/constants.js';
 import { matchDomain, normalizeDomain, getDisplayDomain } from '../../core/domain-matcher.js';
-import { generatePassword, generatePassphrase, analyzePassword, passphraseEntropyBits, strengthFromEntropy } from '../../core/password-generator.js';
-import { generateTOTP, isValidTotpSecret } from '../../core/totp.js';
+import { generatePassword, generatePassphrase, passphraseEntropyBits, strengthFromEntropy } from '../../core/password-generator.js';
+import { latestOnly } from '../../ui/latest.js';
+import { recoveryReveal } from '../../ui/recovery-ui.js';
+import { recoveryCheckDue } from '../../core/recovery-check.js';
+import { generateTOTP, isValidTotpSecret, totpOptions, pickTotpParams, parseTotpInput, DEFAULT_TOTP_PARAMS } from '../../core/totp.js';
 import { formatTimeAgo } from '../../core/util.js';
 import * as IE from '../../core/import-export.js';
-import { firebaseReady } from '../../lib/firebase.js';
-import { h, clear, toast, buzz, openModal, confirmModal, copyValue,
+import { firebaseReady, googleSignInReady } from '../../lib/firebase.js';
+import { h, clear, toast, buzz, openModal, confirmModal, copyValue, pinInput,
          dropdown, switchRow, segmented, strengthMeter } from '../../ui/kit.js';
 import { I } from '../../ui/icons.js';
 import { setView, saveSettings, trySync, scheduleSync,
-         lockNow, rerender, ctx, chrome } from '../../ui/app-core.js';
+         lockNow, rerender, ctx, shell } from '../../ui/app-core.js';
 import { cacheDek } from '../../ui/session-neutral.js';
 
 const local = () => ctx.store;
-const totpRegistry = new Map();
 let totpTimer = null;
+let recoveryReminderDismissed = false; // "Not now" lasts until the next lock
 let currentTab = 'all';
 let selected = new Set();
 let selectMode = false;
+
+/** Called when the vault locks: forget the list screen's selection and stop the code ticker. */
+export function resetVaultViewState() {
+  recoveryReminderDismissed = false;
+  clearInterval(totpTimer);
+  totpTimer = null;
+  selected = new Set();
+  selectMode = false;
+}
 
 function settings() { return ctx.settings; }
 function entries() { return ctx.vault.getEntries(); }
@@ -54,20 +65,28 @@ function subText(e) {
 }
 
 /* ---------- TOTP ticker ---------- */
+/** 6 digits show as "123 456", 8 as "1234 5678". */
+function spaceCode(code) {
+  const half = Math.ceil(code.length / 2);
+  return `${code.slice(0, half)} ${code.slice(half)}`;
+}
+
 function startTicker() {
   clearInterval(totpTimer);
   async function tick() {
     const nodes = document.querySelectorAll('[data-totp-id]');
     if (!nodes.length) { clearInterval(totpTimer); totpTimer = null; return; }
     for (const node of nodes) {
-      const secret = totpRegistry.get(node.dataset.totpId);
+      // Look the entry up each tick instead of keeping a copy of its secret here.
+      // Once the vault locks there is nothing left to find.
+      const e = getEntry(node.dataset.totpId);
       const codeEl = node.querySelector('.nb-totp-code-live');
       const prog = node.querySelector('.prog');
-      if (!secret || !codeEl) continue;
+      if (!e?.totpSecret || !codeEl) continue;
       try {
-        const { code, remaining, period } = await generateTOTP(secret);
+        const { code, remaining, period } = await generateTOTP(e.totpSecret, totpOptions(e));
         codeEl.classList.remove('nb-roll'); void codeEl.offsetWidth;
-        codeEl.textContent = code.replace(/(\d{3})(\d{3})/, '$1 $2');
+        codeEl.textContent = spaceCode(code);
         codeEl.classList.add('nb-roll');
         if (prog) {
           prog.style.strokeDashoffset = String(2 * Math.PI * 9 * (1 - remaining / period));
@@ -83,9 +102,26 @@ function startTicker() {
 }
 
 /* ============================ VAULT LIST ============================ */
+// Set by the list screen. A background sync calls it to refresh the cards without
+// rebuilding the screen, so the search box and the open tab keep what the user did.
+let repaintList = null;
+export function refreshVaultList() { repaintList?.(); }
+
+/** The calm right pane of the two-pane layout when nothing is open. */
+export function renderEmptyPane(c, root) {
+  root.append(h('div', { class: 'ok-empty-pane' },
+    h('div', { class: 'ok-empty-art', html: I.shield }),
+    h('h3', { text: 'Select a login' }),
+    h('p', { text: 'Choose one on the left to see it here, or add a new one with the + button.' })));
+}
+
 export function renderVaultList(c, root) {
-  const { header, footer } = chrome({
+  const unreadable = ctx.vault.takeUndecryptableNotice();
+  if (unreadable) toast(`${unreadable} saved item${unreadable > 1 ? 's' : ''} could not be opened. Nothing was deleted.`, 'error');
+  const { header, footer } = shell({
     actions: [
+      h('button', { class: 'nb-icon-btn', 'aria-label': 'Add login', html: I.plus,
+        onclick: () => setView('edit') }),
       h('button', { class: 'nb-icon-btn', 'aria-label': 'Password generator', html: I.wand,
         onclick: () => setView('generator') }),
       h('button', { class: 'nb-icon-btn', 'aria-label': 'Settings', html: I.gear,
@@ -98,6 +134,7 @@ export function renderVaultList(c, root) {
   });
   const searchWrap = h('div', { class: 'ok-search' },
     h('span', { html: I.search }), search);
+  const reminderSlot = h('div', {});
   const chipsRow = h('div', { class: 'ok-chips', role: 'tablist' });
   const listEl = h('div', { class: 'nb-stagger' });
 
@@ -118,8 +155,7 @@ export function renderVaultList(c, root) {
     }
   }
 
-  async function paintList(q) {
-    clear(listEl);
+  const paintList = latestOnly(async (isCurrent, q) => {
     let items = entries();
     if (currentTab === 'favorites') items = items.filter((e) => e.isFavorite);
     else if (currentTab === 'totp') items = items.filter((e) => e.entryType === 'totp' || (e.totpSecret || '').trim());
@@ -134,6 +170,8 @@ export function renderVaultList(c, root) {
 
     /* current-site matches pinned on top */
     const siteMatches = await chromeQueryMatches(items);
+    if (!isCurrent()) return; // a newer search is already painting
+    clear(listEl);
     if (siteMatches.length) {
       listEl.append(h('div', { class: 'ok-group-title', text: 'For ' + siteMatches.siteLabel }));
       for (const e of siteMatches) listEl.append(entryCard(e, listEl, q));
@@ -147,12 +185,27 @@ export function renderVaultList(c, root) {
     if (selectMode) listEl.append(selectBar());
     for (const e of items) listEl.append(entryCard(e, listEl, q));
     startTicker();
-  }
+  });
 
   search.addEventListener('input', () => paintList(search.value));
-  root.append(header, h('main', { class: 'ok-body' }, searchWrap, chipsRow, listEl), footer);
+  // Arrow keys move through the list. Enter opens the focused row (rows are buttons).
+  const rows = () => [...listEl.querySelectorAll('.ok-entry')];
+  search.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); rows()[0]?.focus(); }
+  });
+  listEl.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    const all = rows();
+    const at = all.indexOf(document.activeElement);
+    if (at === 0 && ev.key === 'ArrowUp') { ev.preventDefault(); search.focus(); return; }
+    const next = all[ev.key === 'ArrowDown' ? Math.min(at + 1, all.length - 1) : Math.max(at - 1, 0)];
+    if (next) { ev.preventDefault(); next.focus(); }
+  });
+  root.append(header, h('main', { class: 'ok-body' }, reminderSlot, searchWrap, chipsRow, listEl), footer);
   paintChips();
   paintList('');
+  showRecoveryReminder(reminderSlot).catch(() => {});
+  repaintList = () => { paintChips(); paintList(search.value); };
 }
 
 async function chromeQueryMatches(allItems) {
@@ -168,7 +221,6 @@ async function chromeQueryMatches(allItems) {
 }
 
 function entryCard(e, listEl, q, confidence) {
-  totpRegistry.set(e.id, e.totpSecret || '');
   const actions = h('div', { class: 'ok-entry-actions' });
   if (e.username) actions.append(iconBtn(I.user, 'Copy username', (ev) => { ev.stopPropagation(); copyValue(e.username, 'Username copied'); }));
   if (e.password) actions.append(iconBtn(I.key, 'Copy password', (ev) => { ev.stopPropagation(); copyValue(e.password, 'Password copied'); }));
@@ -181,7 +233,7 @@ function entryCard(e, listEl, q, confidence) {
       title: 'Click to copy code',
       onclick: async (ev) => {
         ev.stopPropagation();
-        const { code } = await generateTOTP(e.totpSecret);
+        const { code } = await generateTOTP(e.totpSecret, totpOptions(e));
         copyValue(code, 'Code copied');
       },
     },
@@ -192,7 +244,7 @@ function entryCard(e, listEl, q, confidence) {
   }
 
   const card = h('button', {
-    type: 'button', class: 'ok-entry glass hoverable card',
+    type: 'button', class: 'ok-entry glass hoverable card' + (e.id === ctx.selectedId ? ' selected' : ''),
     onclick: () => {
       if (selectMode) { toggleSelect(e.id); rerender(); }
       else setView('detail', e.id);
@@ -317,7 +369,6 @@ export function renderDetail(c, root, id) {
         copyBtn(e.password, 'Password'))));
   }
   if (e.totpSecret && isValidTotpSecret(e.totpSecret)) {
-    totpRegistry.set(id, e.totpSecret);
     const code = h('span', { class: 'ok-totp-code-lg nb-mono nb-totp-code-live', text: '••••••' });
     const ring = ringSvg(34);
     const wrap = h('div', { class: 'ok-field-card glass', attrs: { 'data-totp-id': id } },
@@ -325,7 +376,7 @@ export function renderDetail(c, root, id) {
       h('div', { class: 'ok-totp-big' }, ring, code,
         h('div', { class: 'nb-spacer' }),
         iconBtn(I.copy, 'Copy code', async () => {
-          const { code: c2 } = await generateTOTP(e.totpSecret);
+          const { code: c2 } = await generateTOTP(e.totpSecret, totpOptions(e));
           copyValue(c2, 'Code copied');
         })));
     fields.append(wrap);
@@ -357,18 +408,19 @@ export function renderDetail(c, root, id) {
     toast('Deleted', 'success'); scheduleSync(); setView('list');
   });
 
-  const { header, footer } = chrome({
+  const { header, footer } = shell({
     back: () => setView('list'),
     title: e.nickname || e.siteName || getDisplayDomain(e.domain) || 'Item',
     actions: [star, pinB, del],
   });
 
+  // The main action sits above the footer, and the footer is always last.
   root.append(header,
     h('main', { class: 'ok-body nb-view' }, fields),
-    footer,
-    h('div', { style: { position: 'relative', zIndex: 5, padding: '0 16px calc(14px + env(safe-area-inset-bottom))' } },
+    h('div', { style: { position: 'relative', zIndex: 5, padding: '4px 16px 10px' } },
       h('button', { class: 'nb-btn nb-btn-glass nb-btn-block', text: 'Edit item',
-        onclick: () => setView('edit', id) })));
+        onclick: () => setView('edit', id) })),
+    footer);
   startTicker();
 }
 
@@ -411,7 +463,7 @@ export function renderEdit(c, root, id) {
   meter.update(pw.value);
   pw.addEventListener('input', () => { meter.update(pw.value); gen.style.display = pw.value ? 'none' : ''; });
 
-  const totp = floatInput('TOTP secret (optional)', e.totpSecret, 'Base32…');
+  const totp = floatInput('TOTP secret or otpauth:// link (optional)', e.totpSecret, 'Base32 or otpauth://…');
 
   /* advanced drawer */
   const folders = [...new Set(entries().map((x) => x.folder).filter(Boolean))].sort();
@@ -449,12 +501,17 @@ export function renderEdit(c, root, id) {
         if (!name) { toast('Name your new folder first', 'error'); save.disabled = false; return; }
         folderVal = name;
       }
+      let typedTotp;
+      try { typedTotp = parseTotpInput(totp.value); }
+      catch { return toast('That otpauth link is not valid', 'error'); }
       const data = {
         siteName: siteName.value.trim(),
         domain: normalizeDomain(domain.value.trim()),
         username: username.value.trim(),
         password: pw.value,
-        totpSecret: totp.value.replace(/\s+/g, ''),
+        totpSecret: typedTotp.secret,
+        // A link brings its own settings. An unchanged secret keeps the entry's. A new bare secret gets the defaults.
+        ...(typedTotp.params || (typedTotp.secret === e.totpSecret ? pickTotpParams(e) : DEFAULT_TOTP_PARAMS)),
         notes: notes.value,
         tags: splitList(tagsIn.value),
         matchPatterns: splitList(patternsIn.value),
@@ -463,7 +520,7 @@ export function renderEdit(c, root, id) {
         customFields: [...customWrap.querySelectorAll('.ok-cf-row')].map((r) => ({
           label: r.children[0].value.trim(), value: r.children[1].value, hidden: false,
         })).filter((x) => x.label),
-        entryType: totp.value.trim() && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD,
+        entryType: typedTotp.secret && !pw.value ? ENTRY_TYPES.TOTP : ENTRY_TYPES.PASSWORD,
       };
       if (!data.siteName && !data.domain) return toast('Give it a name or a domain', 'error');
       if (data.totpSecret && !isValidTotpSecret(data.totpSecret)) return toast('That TOTP secret is not valid Base32', 'error');
@@ -478,7 +535,7 @@ export function renderEdit(c, root, id) {
       } catch (err2) { save.disabled = false; toast(err2.message, 'error'); }
     } });
 
-  const { header, footer } = chrome({
+  const { header, footer } = shell({
     back: editing ? () => setView('detail', id) : () => setView('list'),
     title: editing ? 'Edit item' : 'New item',
   });
@@ -572,7 +629,7 @@ export function renderGenerator(c, root) {
     h('span', { html: I.copy }), 'Copy');
   const regenBtn = iconBtn(I.refresh, 'Regenerate', () => { buzz(8); regen(); });
 
-  const { header, footer } = chrome({ title: 'Generator', back: () => setView('list') });
+  const { header, footer } = shell({ title: 'Generator', back: () => setView('list') });
   root.append(header,
     h('main', { class: 'ok-body nb-view' },
       h('div', { style: { margin: '8px 0 14px' } }, seg.el),
@@ -615,7 +672,9 @@ export function renderSettings(c, root) {
     h('div', { class: 'ok-group glass' },
       settingRow('Auto-lock after', lockSeg.el),
       settingRow('Clipboard clears in', clipDd.el),
-      settingRow('Master PIN', actionBtn('Change PIN', renderChangePin))),
+      settingRow('Master PIN', actionBtn('Change PIN', renderChangePin)),
+      settingRow('24 recovery words', actionBtn('Check', () => openRecoveryCheck())),
+      settingRow('Recovery key', actionBtn('Make new', openNewRecoveryKey))),
   );
 
   /* sync */
@@ -630,7 +689,7 @@ export function renderSettings(c, root) {
       h('div', { class: 'ok-group glass' },
         h('div', { style: { padding: '13px 14px', fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', color: 'var(--nb-text-mut)' } },
           'Sign in to mirror your encrypted vault across devices. The cloud only ever sees ciphertext.'),
-        h('div', { style: { padding: '0 14px 14px' } },
+        googleSignInReady() ? h('div', { style: { padding: '0 14px 14px' } },
           h('button', { class: 'nb-btn nb-btn-primary nb-btn-block',
             onclick: async () => {
               try {
@@ -643,9 +702,10 @@ export function renderSettings(c, root) {
                 trySync().catch(() => {});
                 rerender();
               } catch (e2) { toast(e2.message, 'error'); }
-              void signInGoogle;
             } },
-            h('span', { html: I.cloud }), 'Connect cloud sync'))));
+            h('span', { html: I.cloud }), 'Connect cloud sync'))
+          : h('div', { class: 'nb-dim', style: { padding: '0 14px 14px', fontSize: 'var(--nb-fs-xs)' },
+              text: 'Google sign-in is not set up in this extension yet. Use email and password on the welcome screen, or see HANDOFF.md.' })));
   }
 
   /* data */
@@ -654,12 +714,14 @@ export function renderSettings(c, root) {
       settingRow('Backup', actionBtn('Encrypted .json', exportEncrypted)),
       settingRow('Export', actionBtn('Bitwarden / CSV', openExport)),
       settingRow('Import', actionBtn('From file…', openImport)),
+      // A backup restore replaces this vault's key, so it is only offered while there is nothing in it.
+      ...(entries().length === 0 ? [settingRow('Restore', actionBtn('From backup file…', () => setView('restore', { mode: 'backup', back: 'settings' })))] : []),
     ),
     h('div', { class: 'ok-group-title', text: 'Danger zone' }),
     h('div', { class: 'ok-group glass' },
       settingRow('This device', actionBtn('Reset vault…', resetVault, true))));
 
-  const { header, footer } = chrome({ title: 'Settings', back: () => setView('list') });
+  const { header, footer } = shell({ title: 'Settings', back: () => setView('list') });
   root.append(header, h('main', { class: 'ok-body nb-view' }, body), footer);
 }
 
@@ -709,6 +771,98 @@ async function signOutNow() {
   toast('Signed out', 'info');
 }
 
+/* ---------- recovery key: make new words, check the old ones, remind ---------- */
+const markRecoveryChecked = () => local().set({ [STORAGE_KEYS.LAST_RECOVERY_CHECK_AT]: new Date().toISOString() });
+
+/**
+ * Make a new 24-word key. The PIN is asked first. The new words are made but NOT
+ * saved: the old words keep working until the user types three of the new ones
+ * back and presses the button. Closing the window in between changes nothing.
+ */
+export function openNewRecoveryKey() {
+  const pin = pinInput({ autoFocus: true });
+  const content = h('div', {},
+    h('p', { class: 'nb-muted', style: { fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '4px 0 16px' },
+      text: 'This makes 24 new words. Once you confirm them, your old words stop working. Your passwords stay as they are. Enter your PIN to continue.' }),
+    pin.el);
+  const m = openModal([
+    h('h3', { style: { fontFamily: 'var(--nb-font-display)', margin: '0 0 10px', textAlign: 'center' }, text: 'New recovery key' }),
+    content,
+    h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', style: { marginTop: '16px' }, text: 'Continue',
+      onclick: async (ev) => {
+        const btn = ev.currentTarget;
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          // Same check as Change PIN: a throwaway unlock, so wrong tries are counted.
+          const probe = new Vault(local());
+          await probe.unlock(pin.value); probe.lock();
+          const { recoveryMnemonic, commit } = await ctx.vault.prepareRecoveryKey();
+          const { el } = recoveryReveal(recoveryMnemonic, {
+            confirmLabel: 'I saved it. Activate the new key',
+            onConfirmed: async () => {
+              await commit();
+              await markRecoveryChecked();
+              m.close();
+              toast('New recovery key is active. The old words no longer work.', 'success');
+              scheduleSync(0);
+            },
+          });
+          btn.remove();
+          clear(content);
+          content.append(
+            h('p', { class: 'nb-muted', style: { fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '0 0 12px' },
+              text: 'Write these down, offline. Until you press the button below, your old words still work.' }),
+            el);
+        } catch (e) {
+          btn.disabled = false;
+          pin.reset();
+          toast(e.code === 'DECRYPTION_FAILED' ? 'Wrong PIN' : e.message, 'error');
+        }
+      } }),
+  ]);
+}
+
+/** Type the 24 words to find out whether they still open this vault. */
+function openRecoveryCheck({ onChecked } = {}) {
+  const box = h('textarea', { class: 'nb-textarea', rows: 4, spellcheck: 'false', autocomplete: 'off', placeholder: 'Type or paste your 24 words' });
+  const msg = h('div', { style: { minHeight: '20px', fontSize: 'var(--nb-fs-sm)', margin: '8px 0', color: 'var(--nb-danger)' } });
+  const m = openModal([
+    h('h3', { style: { fontFamily: 'var(--nb-font-display)', margin: '0 0 10px', textAlign: 'center' }, text: 'Check my 24 words' }),
+    h('p', { class: 'nb-muted', style: { fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '4px 0 12px' },
+      text: 'OKey never keeps your words. Type them to see that you still have the right ones.' }),
+    box, msg,
+    h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', text: 'Check',
+      onclick: async () => {
+        if (await ctx.vault.verifyRecoveryWords(box.value)) {
+          await markRecoveryChecked();
+          m.close();
+          toast('Your words work.', 'success');
+          onChecked?.();
+        } else {
+          msg.textContent = "Those words don't open this vault. Check the order and spelling, or make new words.";
+        }
+      } }),
+    h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block', style: { marginTop: '8px' }, text: 'I lost them. Make new words.',
+      onclick: () => { m.close(); openNewRecoveryKey(); } }),
+  ]);
+}
+
+/** A small card on the vault list when it is time to check the words again (every 90 days). */
+async function showRecoveryReminder(slot) {
+  if (recoveryReminderDismissed) return;
+  const last = (await local().get(STORAGE_KEYS.LAST_RECOVERY_CHECK_AT))[STORAGE_KEYS.LAST_RECOVERY_CHECK_AT];
+  if (!recoveryCheckDue(last) || recoveryReminderDismissed) return;
+  const card = h('div', { class: 'ok-group glass', style: { padding: '12px 14px', marginBottom: '10px' } },
+    h('div', { style: { fontWeight: '700', fontSize: 'var(--nb-fs-sm)', marginBottom: '4px' }, text: 'Do you still have your 24 words?' }),
+    h('div', { class: 'nb-muted', style: { fontSize: 'var(--nb-fs-xs)', lineHeight: '1.5', marginBottom: '10px' },
+      text: 'They are the only way to open your vault on a new device.' }),
+    h('div', { class: 'nb-row', style: { gap: '8px' } },
+      h('button', { class: 'nb-btn nb-btn-primary nb-btn-sm', text: 'Check now', onclick: () => openRecoveryCheck({ onChecked: () => card.remove() }) }),
+      h('button', { class: 'nb-btn nb-btn-ghost nb-btn-sm', text: 'Not now', onclick: () => { recoveryReminderDismissed = true; card.remove(); } })));
+  slot.append(card);
+}
+
 function renderChangePin() {
   let step = 0; const first = { v: '' };
   const pin1 = pinInput({ autoFocus: true });
@@ -753,14 +907,14 @@ function renderChangePin() {
 
 function exportEncrypted() {
   ctx.vault.exportRecords().then(async (recs) => {
-    const c = await local().get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
+    const c = await local().get([STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_RECOVERY]);
     downloadFile('okey-backup.json', IE.exportOkeyBackup({
       salt: c[STORAGE_KEYS.VAULT_SALT], kdfParams: c[STORAGE_KEYS.KDF_PARAMS],
-      wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER], wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY],
+      wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY],
       records: recs,
     }));
     toast('Encrypted backup saved', 'success');
-  });
+  }).catch((e) => toast(e.message || 'Backup failed', 'error'));
 }
 
 function openExport() {

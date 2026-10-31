@@ -22,13 +22,6 @@
  */
 
 /**
- * @typedef {Object} NetworkAdapter
- * Performs the actual sync transport.
- * @property {(url: string, init: RequestInit) => Promise<Response>} fetch
- * @property {() => Promise<string|null>} getAuthToken  OAuth bearer token (or null)
- */
-
-/**
  * Minimal in-memory StorageAdapter. Reference impl + test double.
  * @implements {StorageAdapter}
  */

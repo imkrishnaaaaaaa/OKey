@@ -17,6 +17,7 @@ import { argon2id } from 'hash-wasm';
 import { KDF } from './constants.js';
 import { utf8ToBytes } from './encoding.js';
 import { secureWipe } from './crypto.js';
+import { FormatError } from './errors.js';
 
 /**
  * @typedef {Object} KdfParams
@@ -28,15 +29,17 @@ import { secureWipe } from './crypto.js';
  * @property {string} [hash]
  */
 
-/** @type {boolean|null} */
-let _argon2Ok = null;
+/** @type {boolean} */
+let _argon2Ok = false;
 
 /**
- * Probe whether Argon2id (WASM) is usable in this runtime. Cached.
+ * Probe whether Argon2id (WASM) is usable in this runtime. Only success is
+ * cached: one failed start (low memory, a busy page) must not turn Argon2 off
+ * until the app restarts.
  * @returns {Promise<boolean>}
  */
 export async function isArgon2Available() {
-  if (_argon2Ok !== null) return _argon2Ok;
+  if (_argon2Ok) return true;
   try {
     await argon2id({
       password: 'probe',
@@ -48,10 +51,10 @@ export async function isArgon2Available() {
       outputType: 'binary',
     });
     _argon2Ok = true;
+    return true;
   } catch {
-    _argon2Ok = false;
+    return false;
   }
-  return _argon2Ok;
 }
 
 /**
@@ -83,7 +86,12 @@ export async function deriveKek(secret, salt, params = null) {
   const secretBytes = utf8ToBytes(secret);
   try {
     const effective = params || (await getRecommendedKdfParams());
-    if (effective.type === 'argon2id' && (await isArgon2Available())) {
+    if (effective.type === 'argon2id') {
+      // PBKDF2 would give a different key, so unlock would say "wrong PIN" and
+      // count a failed try. Stop with a clear error instead.
+      if (!(await isArgon2Available())) {
+        throw new FormatError('This vault needs Argon2, which is not available on this device. Close other tabs or restart the browser and try again.');
+      }
       const kek = await argon2id({
         password: secretBytes,
         salt,
@@ -125,5 +133,5 @@ async function derivePbkdf2(secretBytes, salt, params) {
 
 /** Test-only: reset the cached Argon2 availability probe. */
 export function _resetArgon2Probe() {
-  _argon2Ok = null;
+  _argon2Ok = false;
 }

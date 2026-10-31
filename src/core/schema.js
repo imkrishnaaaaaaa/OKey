@@ -7,6 +7,7 @@
 
 import { APP, ENTRY_TYPES } from './constants.js';
 import { ValidationError } from './errors.js';
+import { normalizeTotpParams } from './totp.js';
 
 /**
  * @typedef {Object} VaultEntry
@@ -29,6 +30,9 @@ import { ValidationError } from './errors.js';
  * @property {string} username         SENSITIVE
  * @property {string} password         SENSITIVE
  * @property {string} totpSecret       SENSITIVE (Base32)
+ * @property {number} totpDigits       6, 7 or 8 (default 6)
+ * @property {number} totpPeriod       seconds per code (default 30)
+ * @property {string} totpAlgorithm    'SHA-1' | 'SHA-256' | 'SHA-512' (default SHA-1)
  * @property {string} notes            SENSITIVE
  * @property {Array<{label:string,value:string,hidden:boolean}>} customFields SENSITIVE
  * @property {number} schemaVersion
@@ -75,6 +79,7 @@ export function createEntry(data, genId, nowIso) {
     username: clampStr(data.username, 1000),
     password: clampStr(data.password, 10000),
     totpSecret: clampStr(data.totpSecret, 1000).replace(/\s+/g, ''),
+    ...normalizeTotpParams({ digits: data.totpDigits, period: data.totpPeriod, algorithm: data.totpAlgorithm }),
     notes: clampStr(data.notes, 20000),
     customFields: sanitizeCustomFields(data.customFields),
     schemaVersion: APP.ENTRY_SCHEMA_VERSION,

@@ -12,6 +12,12 @@
 
 const FS_BASE = 'https://firestore.googleapis.com/v1/projects';
 const DB_ID = '(default)';
+// Firestore caps a commit at 500 writes and 10 MiB. Entry payloads can reach
+// 100 KB each, so 50 per commit keeps the worst case near 5 MiB.
+const COMMIT_BATCH = 50;
+// Entries written by one commit share a syncedAt, so a pull page must be bigger
+// than one commit or those entries could straddle two pages. Keep this above COMMIT_BATCH.
+const PULL_PAGE = 500;
 
 export class CloudError extends Error {
   constructor(message, code = 'CLOUD_ERROR') {
@@ -63,7 +69,9 @@ export function fromFsFields(fields) {
  */
 export class CloudStore {
   constructor({ projectId, getToken }) {
+    this.docsRoot = `projects/${projectId}/databases/${DB_ID}/documents`;
     this.base = `${FS_BASE}/${projectId}/databases/${DB_ID}/documents`;
+    this.pageSize = PULL_PAGE;
     this.getToken = getToken;
   }
 
@@ -102,13 +110,19 @@ export class CloudStore {
     return m;
   }
 
-  /** @param {{salt,kdfParams,wrappedMaster,wrappedRecovery,formatVersion,updatedAt}} meta */
+  /**
+   * Replaces the whole meta doc (PATCH without a field mask). There is no
+   * wrappedMaster here on purpose: the PIN has 10,000 options, so a copy of its
+   * wrap in the cloud could be brute-forced offline. Only the 24-word recovery
+   * wrap leaves the device.
+   * @param {{salt,kdfParams,wrappedRecovery,recoveryVersion,formatVersion}} meta
+   */
   async pushMeta(uid, meta) {
     const fields = toFsFields({
       salt: meta.salt,
       kdfParamsRaw: JSON.stringify(meta.kdfParams || {}),
-      wrappedMaster: meta.wrappedMaster || '',
       wrappedRecovery: meta.wrappedRecovery || '',
+      recoveryVersion: meta.recoveryVersion || 1,
       formatVersion: meta.formatVersion || 2,
       updatedAt: new Date().toISOString(),
     });
@@ -122,11 +136,24 @@ export class CloudStore {
 
   async pullSettings(uid) {
     const doc = await this._request(`${this._userPath(uid)}/vault/settings`, { allowMissing: true });
-    return doc?.fields ? fromFsFields(doc.fields) : null;
+    if (!doc?.fields) return null;
+    const out = {};
+    for (const [k, v] of Object.entries(fromFsFields(doc.fields))) {
+      if (!k.endsWith('Raw')) { out[k] = v; continue; }
+      // Object settings travel as JSON text. Bad JSON is dropped, and
+      // sanitizeSettings still checks whatever parses.
+      try { out[k.slice(0, -3)] = JSON.parse(v); } catch { /* ignore */ }
+    }
+    return out;
   }
 
   async pushSettings(uid, settings) {
-    const fields = toFsFields({ ...settings, updatedAt: new Date().toISOString() });
+    const flat = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (v && typeof v === 'object') flat[`${k}Raw`] = JSON.stringify(v);
+      else flat[k] = v;
+    }
+    const fields = toFsFields({ ...flat, updatedAt: new Date().toISOString() });
     await this._request(
       `${this._userPath(uid)}/vault/settings`,
       { method: 'PATCH', body: JSON.stringify({ fields }) },
@@ -135,60 +162,75 @@ export class CloudStore {
 
   // ---- entries ----
 
-  /** Pull entries updated after `since` ISO string. Returns at-rest records. */
-  async pullEntriesDelta(uid, since) {
-    const body = {
-      structuredQuery: {
-        from: [{ collectionId: 'entries' }],
-        where: {
-          fieldFilter: { field: { fieldPath: 'updatedAt' }, op: 'GREATER_THAN', value: { stringValue: since } },
+  /**
+   * Pull every entry whose server time (syncedAt) is at or after `cursor`, in
+   * pages. Returns the records plus the next cursor: the last syncedAt seen, or
+   * the same cursor when nothing is new. The query uses >= so entries that share
+   * the cursor's exact time are never skipped. Each entry is returned once.
+   * @param {string} cursor a syncedAt timestamp (SYNC_EPOCH for a full pull)
+   * @returns {Promise<{records: Array, cursor: string}>}
+   */
+  async pullEntriesDelta(uid, cursor) {
+    const byId = new Map(); // pages overlap on the cursor's own time, so keep one copy per entry
+    let from = cursor;
+    for (;;) {
+      const body = {
+        structuredQuery: {
+          from: [{ collectionId: 'entries' }],
+          where: {
+            fieldFilter: { field: { fieldPath: 'syncedAt' }, op: 'GREATER_THAN_OR_EQUAL', value: { timestampValue: from } },
+          },
+          orderBy: [{ field: { fieldPath: 'syncedAt' } }],
+          limit: { value: this.pageSize },
         },
-        orderBy: [{ field: { fieldPath: 'updatedAt' } }],
-        limit: { value: 500 },
-      },
-    };
-    const res = await this._request(`${this._userPath(uid)}:runQuery`, { method: 'POST', body: JSON.stringify(body) });
-    const rows = Array.isArray(res) ? res : [];
-    return rows.filter((r) => r.document).map((r) => this._docToRecord(r.document));
-  }
-
-  async pullAllEntries(uid) {
-    const body = { structuredQuery: { from: [{ collectionId: 'entries' }], limit: { value: 10000 } } };
-    const res = await this._request(`${this._userPath(uid)}:runQuery`, { method: 'POST', body: JSON.stringify(body) });
-    const rows = Array.isArray(res) ? res : [];
-    return rows.filter((r) => r.document).map((r) => this._docToRecord(r.document));
+      };
+      const res = await this._request(`${this._userPath(uid)}:runQuery`, { method: 'POST', body: JSON.stringify(body) });
+      const page = (Array.isArray(res) ? res : []).filter((r) => r.document).map((r) => this._docToRecord(r.document));
+      for (const r of page) byId.set(r.id, r);
+      const last = page.at(-1)?.syncedAt;
+      if (!last || page.length < this.pageSize) return { records: [...byId.values()], cursor: last || from };
+      if (last === from) throw new CloudError('Cloud pull stalled on one timestamp', 'REMOTE');
+      from = last;
+    }
   }
 
   /**
-   * Push at-rest records (shape from Vault.exportRecords()). Batches writes.
+   * Push at-rest records (shape from Vault.exportRecords()) with batched
+   * commits. Each write replaces its whole doc, same as PATCH without a mask.
+   * Throws on the first failed commit. Earlier commits stay, and re-sending is
+   * safe because every write is a full replace of the same doc.
    * @param {Array} records
+   * @returns {Promise<number>} how many records were sent
    */
   async pushEntries(uid, records) {
-    const batch = records.slice(0, 450);
-    await Promise.all(batch.map((rec) => {
-      const fields = toFsFields({
-        id: rec.id,
-        domain: rec.domain || '',
-        folder: rec.folder || '',
-        entryType: rec.entryType || 'password',
-        version: rec.version || 1,
-        isDeleted: !!rec.isDeleted,
-        updatedAt: rec.updatedAt || new Date().toISOString(),
-        displayOrder: rec.displayOrder || 0,
-        isPinned: !!rec.isPinned,
-        payload: rec.payload || '',
-      });
-      return this._request(
-        `${this._userPath(uid)}/vault/entries/${encodeURIComponent(rec.id)}`,
-        { method: 'PATCH', body: JSON.stringify({ fields }) },
-      );
-    }));
-    return batch.length;
+    for (let i = 0; i < records.length; i += COMMIT_BATCH) {
+      const writes = records.slice(i, i + COMMIT_BATCH).map((rec) => ({
+        update: {
+          name: `${this.docsRoot}${this._userPath(uid)}/entries/${encodeURIComponent(rec.id)}`,
+          fields: toFsFields({
+            id: rec.id,
+            domain: rec.domain || '',
+            folder: rec.folder || '',
+            entryType: rec.entryType || 'password',
+            version: rec.version || 1,
+            isDeleted: !!rec.isDeleted,
+            updatedAt: rec.updatedAt || new Date().toISOString(),
+            displayOrder: rec.displayOrder || 0,
+            isPinned: !!rec.isPinned,
+            payload: rec.payload || '',
+          }),
+        },
+        // Server clock, so pulls never depend on any device's clock.
+        updateTransforms: [{ fieldPath: 'syncedAt', setToServerValue: 'REQUEST_TIME' }],
+      }));
+      await this._request(':commit', { method: 'POST', body: JSON.stringify({ writes }) });
+    }
+    return records.length;
   }
 
   /** Hard-remove a tombstoned entry from the cloud (optional GC step). */
   async deleteEntry(uid, id) {
-    await this._request(`${this._userPath(uid)}/vault/entries/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await this._request(`${this._userPath(uid)}/entries/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   _docToRecord(doc) {
@@ -204,6 +246,7 @@ export class CloudStore {
       displayOrder: f.displayOrder || 0,
       isPinned: !!f.isPinned,
       payload: f.payload || '',
+      syncedAt: f.syncedAt || '',
     };
   }
 }

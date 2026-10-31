@@ -5,7 +5,14 @@
   margin: 0 auto;
   min-height: 100vh;
   min-height: 100dvh;
+  /* A column that fills the window: the header on top, the body takes the rest,
+     and the footer stays at the bottom, as it already does in the popup. */
+  display: flex;
+  flex-direction: column;
 }
+.pwa-shell > .ok-body { flex: 1 1 auto; min-height: 0; }
+.pwa-shell > .ok-footer { flex: 0 0 auto; margin-top: auto; }
+.pwa-shell > .ok-fullscreen { flex: 1 1 auto; }
 
 /* roomier touch targets on mobile */
 .nb-btn { min-height: 48px; }

@@ -5,16 +5,17 @@
  *   • delta sync (push local changes, pull remote changes)
  *   • first-run restore from an existing cloud vault
  *   • one-time "Move to cloud" migration of a local-only vault
- *   • offline queue that flushes on the next successful sync
  *
  * The UI owns scheduling (unlock/focus/interval) and error display; this
  * module owns semantics.
  */
 
 import { STORAGE_KEYS } from './constants.js';
-import { nowIso } from './util.js';
-import { SYNC_EPOCH } from './cloud.js';
+import { SYNC_EPOCH, CloudError } from './cloud.js';
 import { mergeRemoteSettings } from './settings.js';
+
+/** What a record looks like in the cloud: enough to tell if it changed. */
+const stamp = (r) => `${r.version}:${r.updatedAt}`;
 
 export class CloudSync {
   /**
@@ -36,47 +37,66 @@ export class CloudSync {
   }
 
   /**
-   * Delta sync for an unlocked vault.
-   * @returns {Promise<{pushed:number,pulled:number,queued:number}>}
+   * Delta sync for an unlocked vault: pull, merge, then push what changed here.
+   *  - Pull first, so a lower local version never overwrites a higher cloud one.
+   *  - The cursor is a server time (syncedAt), so no device clock matters.
+   *  - A ledger of "what the cloud holds" per entry decides what to push. It is
+   *    filled from pulls and pushes, so remote changes are never sent back.
+   * A failed pull or push throws before the cursor moves, so the next sync
+   * redoes the same work.
+   * @returns {Promise<{pushed:number,pulled:number}>}
    */
   async sync(vault) {
     const uid = await this.getUid();
     if (!uid) throw new Error('Not signed in');
-    const last = (await this.getLastSyncAt()) || SYNC_EPOCH;
+    await this._syncMeta(uid);
 
-    const records = await vault.exportRecords();
-    const modified = records.filter((r) => (r.updatedAt || SYNC_EPOCH) > last);
-
-    let pushed = 0;
-    try {
-      pushed = await this.cloud.pushEntries(uid, modified);
-    } catch (e) {
-      await this._enqueue(modified);
-      const queued = await this.flushQueue(vault).catch(() => ({ remaining: 0 }));
-      return { pushed: 0, pulled: 0, queued: queued.remaining };
-    }
-
+    const { records: remote, cursor } = await this.cloud.pullEntriesDelta(uid, (await this.getLastSyncAt()) || SYNC_EPOCH);
     let pulled = 0;
-    const remote = await this.cloud.pullEntriesDelta(uid, last);
-    if (remote.length) {
-      ({ applied: pulled } = await vault.mergeRemoteRecords(remote));
-    }
+    if (remote.length) ({ applied: pulled } = await vault.mergeRemoteRecords(remote));
 
-    const nextCursor = new Date().toISOString();
-    await this.setLastSyncAt(nextCursor);
-    const queued = await this.flushQueue(vault);
-    return { pushed, pulled, queued: queued.remaining };
+    const ledger = await this._loadLedger(uid);
+    for (const r of remote) ledger[r.id] = stamp(r);
+    const modified = (await vault.exportRecords()).filter((r) => ledger[r.id] !== stamp(r));
+    const pushed = await this.cloud.pushEntries(uid, modified);
+    for (const r of modified) ledger[r.id] = stamp(r);
+
+    await this._saveLedger(uid, ledger);
+    await this.setLastSyncAt(cursor);
+    // Older versions kept an offline queue here. Its copies are stale, so drop them.
+    await this.store.remove(STORAGE_KEYS.LEGACY_OFFLINE_QUEUE);
+    return { pushed, pulled };
   }
 
-  /** Pull key material and entries from the cloud into an empty local vault. */
-  async restoreFromCloud(vault, masterPin) {
+  _ledgerKey(uid) { return `okey_pushed_${uid}`; }
+
+  async _loadLedger(uid) {
+    const k = this._ledgerKey(uid);
+    return (await this.store.get(k))[k] || {};
+  }
+
+  _saveLedger(uid, ledger) { return this.store.set({ [this._ledgerKey(uid)]: ledger }); }
+
+  /** True when the signed-in account already has a vault in the cloud. */
+  async hasCloudVault() {
+    const uid = await this.getUid();
+    if (!uid) throw new Error('Not signed in');
+    return !!(await this.cloud.pullMeta(uid))?.salt;
+  }
+
+  /**
+   * New-device restore: open the cloud vault with the 24 recovery words and
+   * seal it under a new local PIN. Writes nothing when the words are wrong.
+   */
+  async restoreFromCloud(vault, mnemonic, newPin) {
     const uid = await this.getUid();
     if (!uid) throw new Error('Not signed in');
     const meta = await this.cloud.pullMeta(uid);
-    if (!meta?.salt || !meta?.wrappedMaster) throw new Error('No cloud vault found for this account');
-    const entries = await this.cloud.pullAllEntries(uid);
-    await vault.restoreFromRemote(masterPin, meta, entries);
-    await this.setLastSyncAt(new Date().toISOString());
+    if (!meta?.salt) throw new Error('No cloud vault found for this account');
+    const { records, cursor } = await this.cloud.pullEntriesDelta(uid, SYNC_EPOCH);
+    await vault.restoreWithRecovery(mnemonic, newPin, meta, records);
+    await this._saveLedger(uid, Object.fromEntries(records.map((r) => [r.id, stamp(r)])));
+    await this.setLastSyncAt(cursor);
   }
 
   /**
@@ -84,23 +104,7 @@ export class CloudSync {
    * the signed-in account. Idempotent by entry id/version.
    */
   async moveToCloud(vault) {
-    const uid = await this.getUid();
-    if (!uid) throw new Error('Not signed in');
-    const c = await this.store.get([
-      STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS,
-      STORAGE_KEYS.WRAPPED_BY_MASTER, STORAGE_KEYS.WRAPPED_BY_RECOVERY,
-    ]);
-    await this.cloud.pushMeta(uid, {
-      salt: c[STORAGE_KEYS.VAULT_SALT],
-      kdfParams: c[STORAGE_KEYS.KDF_PARAMS],
-      wrappedMaster: c[STORAGE_KEYS.WRAPPED_BY_MASTER],
-      wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] || '',
-      formatVersion: 2,
-    });
-    const records = await vault.exportRecords();
-    await this.cloud.pushEntries(uid, records);
-    await this.setLastSyncAt(nowIso());
-    return records.length;
+    return (await this.sync(vault)).pushed;
   }
 
   /** Merge remote settings over local ones through the allowlist gate. */
@@ -120,34 +124,50 @@ export class CloudSync {
     await this.cloud.pushSettings(uid, settings);
   }
 
-  // ---- offline queue ----
-
-  async _enqueue(records) {
-    if (!records?.length) return;
-    const { [STORAGE_KEYS.OFFLINE_QUEUE]: queue = [] } = await this.store.get(STORAGE_KEYS.OFFLINE_QUEUE);
-    queue.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, records });
-    await this.store.set({ [STORAGE_KEYS.OFFLINE_QUEUE]: queue });
+  /**
+   * Keeps the cloud meta in step with this device, once per account and key set.
+   *  - Another salt means another vault (another DEK): throw VAULT_EXISTS.
+   *    Writing there would make the cloud vault unreadable.
+   *  - A newer recovery key in the cloud (higher recoveryVersion) wins: copy it
+   *    here and never push over it. Otherwise a device that missed the change
+   *    would bring back the old words.
+   *  - No meta, a legacy wrappedMaster, or a newer recovery key here: upload ours.
+   * Old meta with no recoveryVersion counts as 1. The pass is cached per uid +
+   * salt + version, so a local reset or a new recovery key checks again.
+   */
+  async _syncMeta(uid) {
+    let local = await this._localMeta();
+    if (this._metaKey === this._metaKeyFor(uid, local)) return;
+    const remote = await this.cloud.pullMeta(uid);
+    if (remote?.salt && remote.salt !== local.salt) {
+      throw new CloudError('This account already holds a different vault. Reset this device and restore it with your 24 recovery words, or sign in with another account.', 'VAULT_EXISTS');
+    }
+    const remoteVersion = Number(remote?.recoveryVersion) || 1;
+    if (remote?.wrappedRecovery && remoteVersion > local.recoveryVersion) {
+      await this.store.set({
+        [STORAGE_KEYS.WRAPPED_BY_RECOVERY]: remote.wrappedRecovery,
+        [STORAGE_KEYS.RECOVERY_VERSION]: remoteVersion,
+      });
+      local = await this._localMeta();
+    } else if (!remote?.salt || remote.wrappedMaster || local.recoveryVersion > remoteVersion) {
+      await this.cloud.pushMeta(uid, local);
+    }
+    this._metaKey = this._metaKeyFor(uid, local);
   }
 
-  /** @returns {Promise<{processed:number,remaining:number}>} */
-  async flushQueue(vault) {
-    const { [STORAGE_KEYS.OFFLINE_QUEUE]: queue = [] } = await this.store.get(STORAGE_KEYS.OFFLINE_QUEUE);
-    if (!queue.length) return { processed: 0, remaining: 0 };
-    const uid = await this.getUid();
-    if (!uid) return { processed: 0, remaining: queue.length };
+  _metaKeyFor(uid, local) { return `${uid}:${local.salt}:${local.recoveryVersion}`; }
 
-    const remaining = [];
-    let processed = 0;
-    for (const item of queue.slice(-10)) { // ponytail: cap flush bursts at 10 batches
-      try {
-        await this.cloud.pushEntries(uid, item.records);
-        processed++;
-      } catch {
-        remaining.push(item);
-      }
-    }
-    await this.store.set({ [STORAGE_KEYS.OFFLINE_QUEUE]: remaining });
-    void vault;
-    return { processed, remaining: remaining.length };
+  /** The key material that may leave this device. Never the PIN wrap. */
+  async _localMeta() {
+    const c = await this.store.get([
+      STORAGE_KEYS.VAULT_SALT, STORAGE_KEYS.KDF_PARAMS, STORAGE_KEYS.WRAPPED_BY_RECOVERY, STORAGE_KEYS.RECOVERY_VERSION,
+    ]);
+    return {
+      salt: c[STORAGE_KEYS.VAULT_SALT],
+      kdfParams: c[STORAGE_KEYS.KDF_PARAMS],
+      wrappedRecovery: c[STORAGE_KEYS.WRAPPED_BY_RECOVERY] || '',
+      recoveryVersion: Number(c[STORAGE_KEYS.RECOVERY_VERSION]) || 1,
+      formatVersion: 2,
+    };
   }
 }

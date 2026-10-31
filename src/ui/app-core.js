@@ -4,19 +4,20 @@
  * Screens live in ./views-auth.js and ./views-vault.js.
  */
 
-import { CloudStore } from '../core/cloud.js';
-import { CloudSync } from '../core/cloud-sync.js';
-import { DEFAULT_SETTINGS, STORAGE_KEYS, SECURITY } from '../core/constants.js';
+import { createCloudSync } from '../lib/cloud-sync-factory.js';
+import { DEFAULT_SETTINGS, STORAGE_KEYS } from '../core/constants.js';
 import { sanitizeSettings } from '../core/settings.js';
-import { cacheDek, getCachedDek, touchSession, clearSession } from './session-neutral.js';
+import { getCachedDek, touchSession, clearSession } from './session-neutral.js';
 export { touchSession, clearSession };
 export { setSessionBridge } from './session-neutral.js';
-import { firebaseReady, onAuthChanged, signOutUser } from '../lib/firebase.js';
+import { firebaseReady, onAuthChanged, signOutUser, getCurrentUser } from '../lib/firebase.js';
 import { FIREBASE_CONFIG } from '../lib/firebase-config.js';
-import { h, clear, toast, buzz } from './kit.js';
+import { h, clear, toast, buzz, closeModal, setClipboardPolicy, isModalOpen } from './kit.js';
+import { hashFor, viewFromHash } from './route.js';
+import { createIdleTimer } from './idle.js';
 import { I } from './icons.js';
-import { renderWelcome, renderOnboarding, renderLock } from '../extension/ui/views-auth.js';
-import { renderVaultList, renderDetail, renderEdit, renderGenerator, renderSettings }
+import { renderWelcome, renderOnboarding, renderLock, renderRestore } from '../extension/ui/views-auth.js';
+import { renderVaultList, renderDetail, renderEdit, renderGenerator, renderSettings, renderEmptyPane, resetVaultViewState, refreshVaultList }
   from '../extension/ui/views-vault.js';
 
 let local = null; // set by attachCore()
@@ -28,7 +29,6 @@ export const ctx = {
   user: null,
   cloudSync: null,
   syncStatus: 'idle', // idle | syncing | ok | err | off
-  lastActivity: 0,
 };
 
 /**
@@ -46,40 +46,7 @@ export function attachCore({ storage, vault }) {
 /* ---------- cloud wiring ---------- */
 function buildCloud() {
   if (!firebaseReady()) return null;
-  const cloud = new CloudStore({
-    projectId: FIREBASE_CONFIG.projectId,
-    getToken: async () => {
-      try {
-        const { getAuth } = await import('firebase/auth');
-        const token = await getAuth().currentUser?.getIdToken();
-        return token || null;
-      } catch { return null; }
-    },
-    // projectId lookup uses config; uid comes from the same auth handle
-  });
-  const getUid = async () => {
-    try {
-      const { getAuth } = await import('firebase/auth');
-      return getAuth().currentUser?.uid || null;
-    } catch { return null; }
-  };
-  ctx.cloudSync = new CloudSync({
-    store: local,
-    cloud,
-    getUid,
-    getLastSyncAt: async () => {
-      const uid = await getUid();
-      if (!uid) return null;
-      const r = await local.get('okey_last_sync_' + uid);
-      return r['okey_last_sync_' + uid] || null;
-    },
-    setLastSyncAt: async (iso) => {
-      const uid = await getUid();
-      if (!uid) return;
-      await local.set({ ['okey_last_sync_' + uid]: iso });
-    },
-  });
-  void cloud._userPath; // keep linters honest about intentional method presence
+  ctx.cloudSync = createCloudSync({ store: local, projectId: FIREBASE_CONFIG.projectId, getUser: getCurrentUser });
   return ctx.cloudSync;
 }
 
@@ -98,25 +65,100 @@ export async function saveSettings(patch) {
 
 /* ---------- view router ---------- */
 let currentView = null;
+let currentArgs = [];
+
+// Switched on by the PWA entry only. The extension never calls configureShell, so
+// its popup keeps one screen at a time and does not touch the address bar.
+const layout = { routing: false, twoPane: () => false };
+let routingBound = false;
+const VIEWS = {
+  welcome: renderWelcome, onboarding: renderOnboarding, restore: renderRestore, lock: renderLock,
+  list: renderVaultList, detail: renderDetail, edit: renderEdit,
+  generator: renderGenerator, settings: renderSettings,
+};
+const RIGHT_PANE_VIEWS = new Set(['detail', 'edit', 'generator', 'settings']);
+const APP_VIEWS = new Set(['list', ...RIGHT_PANE_VIEWS]);
+let split = null; // { el, left, right } while two panes are on screen
+
+/**
+ * @param {{ routing?: boolean, twoPane?: () => boolean }} opts
+ *   routing: unlocked screens get addresses (#/item/<id>) so reload and Back work.
+ *   twoPane: true when the window is wide enough for a list and a detail side by side.
+ */
+export function configureShell({ routing = false, twoPane = () => false } = {}) {
+  layout.routing = routing;
+  layout.twoPane = twoPane;
+  if (routing && !routingBound) {
+    routingBound = true;
+    addEventListener('popstate', () => {
+      if (!ctx.vault?.isUnlocked()) return; // the lock screen has no address
+      const { view, args } = viewFromHash(location.hash);
+      render(view, args);
+    });
+  }
+}
+
+/** Show a screen, and give it an address when routing is on. */
 export function setView(name, ...args) {
+  if (layout.routing) {
+    const hash = hashFor(name, args);
+    if (hash && hash !== location.hash) history.pushState(null, '', hash);
+  }
+  render(name, args);
+}
+
+/** After unlocking: go to the screen in the address (a reload keeps the open item), else the list. */
+export function goHome() {
+  const { view, args } = layout.routing ? viewFromHash(location.hash) : { view: 'list', args: [] };
+  render(view, args);
+}
+
+/** The window crossed the two-pane breakpoint: draw the current screen again in the right layout. */
+export function relayout() {
+  if (APP_VIEWS.has(currentView)) render(currentView, currentArgs);
+}
+
+function render(name, args) {
+  const fn = VIEWS[name];
+  if (!fn) return;
   currentView = name;
+  currentArgs = args;
+  ctx.selectedId = (name === 'detail' || name === 'edit') ? args[0] ?? null : null;
   const app = document.getElementById('app');
+  if (APP_VIEWS.has(name) && layout.twoPane()) return renderSplit(app, name, args, fn);
+  split = null;
   clear(app);
   app.classList.remove('nb-view');
   void app.offsetWidth;
-  const views = {
-    welcome: renderWelcome, onboarding: renderOnboarding, lock: renderLock,
-    list: renderVaultList, detail: renderDetail, edit: renderEdit,
-    generator: renderGenerator, settings: renderSettings,
-  };
-  const fn = views[name];
-  if (!fn) return;
   fn(ctx, app, ...args);
   // re-trigger entrance animation
   for (const child of app.children) child.classList?.add('nb-view');
 }
 
-export function rerender() { if (currentView) setView(currentView); }
+/** List on the left (kept, so its search text stays), the chosen screen on the right. */
+function renderSplit(app, name, args, fn) {
+  if (!split || !app.contains(split.el)) {
+    clear(app);
+    const left = h('section', { class: 'ok-pane ok-pane-list' });
+    const right = h('section', { class: 'ok-pane ok-pane-main' });
+    const el = h('div', { class: 'ok-split' }, left, right);
+    app.append(el);
+    split = { el, left, right };
+    renderVaultList(ctx, left);
+  } else {
+    refreshVaultList(); // marks the selected row and picks up edits
+  }
+  clear(split.right);
+  if (name === 'list') renderEmptyPane(ctx, split.right);
+  else fn(ctx, split.right, ...args);
+}
+
+// Escape closes the open item in the two-pane layout, unless a dialog wants the key.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !isModalOpen() && layout.twoPane() && RIGHT_PANE_VIEWS.has(currentView)) setView('list');
+});
+
+export function rerender() { if (currentView) render(currentView, currentArgs); }
 
 /* ---------- sync ---------- */
 let syncTimer = null;
@@ -130,13 +172,13 @@ export async function trySync(reason = '') {
   clearTimeout(syncTimer);
   setSyncStatus('syncing');
   try {
-    await ctx.cloudSync.sync(vault);
+    await ctx.cloudSync.sync(ctx.vault);
     await ctx.cloudSync.pullSettings(ctx.settings, {
       apply: (merged) => { ctx.settings = merged; local.set({ [STORAGE_KEYS.SETTINGS]: merged }); applyTheme(merged.theme); },
     }).catch(() => {});
     setSyncStatus('ok');
     if (reason === 'manual') toast('Synced', 'success');
-    if (currentView === 'list') rerender();
+    if (currentView === 'list') refreshVaultList();
   } catch (e) {
     setSyncStatus(e.code === 'NOT_SIGNED_IN' ? 'off' : 'err');
   }
@@ -148,7 +190,12 @@ export function scheduleSync(delay = 6000) {
 }
 
 /* ---------- shared chrome for unlocked screens ---------- */
-export function chrome({ active = '', title = null, back = null, actions = [] } = {}) {
+// One listener for the whole app, repainting whichever header is on screen now.
+// A listener per header would pile up and keep every old screen alive.
+let syncDot = null;
+document.addEventListener('okey-sync-status', () => { if (syncDot) paintDot(syncDot); });
+
+export function shell({ active = '', title = null, back = null, actions = [] } = {}) {
   const acctChip = buildAcctChip();
   const header = h('header', { class: 'ok-header' },
     back
@@ -174,9 +221,7 @@ export function chrome({ active = '', title = null, back = null, actions = [] } 
     h('button', { class: 'nb-icon-btn', style: { width: '28px', height: '28px' }, 'aria-label': 'Lock vault', html: I.lock,
       onclick: () => lockNow() }),
   );
-  document.removeEventListener('okey-sync-status', header._syncSub || (() => {}));
-  header._syncSub = () => paintDot(dot);
-  document.addEventListener('okey-sync-status', header._syncSub);
+  syncDot = dot;
   paintDot(dot);
   return { header, footer };
 }
@@ -213,7 +258,7 @@ function buildAcctChip() {
           await signOutUser(); toast('Signed out', 'info');
         } }),
       );
-      const m = openMenuShell(menu, (ev) => !acctOpen || (ev.composedPath().includes(e.currentTarget) ? false : (acctOpen = false)));
+      const m = openMenuShell(menu);
       e.stopPropagation();
     },
   },
@@ -223,7 +268,6 @@ function buildAcctChip() {
     h('span', { class: 'ok-acct-mail', text: ctx.user.email }));
 }
 
-import { openModal } from './kit.js';
 function openMenuShell(menu) {
   const ov = h('div', {
     style: { position: 'fixed', inset: '0', zIndex: 900 },
@@ -235,35 +279,31 @@ function openMenuShell(menu) {
 
 export async function lockNow() {
   buzz([10, 30, 10]);
+  resetIdle.cancel();
   await clearSession();
   ctx.vault.lock();
+  closeModal(); // a dialog opened while unlocked (export, import) must not outlive the lock
+  resetVaultViewState();
   setView('lock');
 }
 
 /* ---------- idle auto-lock ---------- */
-let idleTimer = null;
-function resetIdle() {
-  clearTimeout(idleTimer);
-  if (!ctx.vault.isUnlocked()) return;
-  const now = Date.now();
-  if (now - ctx.lastActivity < 4000) return;
-  ctx.lastActivity = now;
-  touchSession(ctx.settings.autoLockTimeout);
-  idleTimer = setTimeout(() => lockNow(), ctx.settings.autoLockTimeout * 1000);
-}
+export const resetIdle = createIdleTimer({
+  isUnlocked: () => ctx.vault.isUnlocked(),
+  timeoutMs: () => ctx.settings.autoLockTimeout * 1000,
+  onTouch: () => touchSession(ctx.settings.autoLockTimeout),
+  onLock: () => lockNow(),
+});
 ['pointerdown', 'keydown'].forEach((ev) =>
   document.addEventListener(ev, () => { resetIdle(); }, { passive: true }));
 
 /* ---------- boot (platform shells call mountCore) ---------- */
-export function platformStorage(adapter) {
-  return adapter;
-}
-
 export async function mountCore() {
   local = ctx.store;
   const s = await local.get(STORAGE_KEYS.SETTINGS);
   ctx.settings = sanitizeSettings(s[STORAGE_KEYS.SETTINGS], { ...DEFAULT_SETTINGS });
   applyTheme();
+  setClipboardPolicy({ seconds: () => ctx.settings.clipboardClearTimeout });
 
   onAuthChanged((user) => {
     const was = ctx.user;
@@ -286,7 +326,7 @@ export async function mountCore() {
       await ctx.vault.unlockWithDek(dek);
       dek.fill(0);
       resetIdle();
-      setView('list');
+      goHome();
       trySync().catch(() => {});
       return;
     } catch { /* fall through */ }

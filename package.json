@@ -1,7 +1,7 @@
 {
   "name": "okey",
   "version": "1.0.0",
-  "description": "OKey — A premium zero-knowledge password & 2FA manager backed by your own Google Sheet.",
+  "description": "OKey — A zero-knowledge password & 2FA manager. Chrome extension and PWA, end-to-end encrypted, synced through your own Firebase account.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -27,8 +27,8 @@
   },
   "dependencies": {
     "@scure/bip39": "^1.6.0",
-    "chart.js": "^4.5.1",
     "firebase": "^11.10.0",
-    "hash-wasm": "^4.12.0"
+    "hash-wasm": "^4.12.0",
+    "tldts": "^7.4.19"
   }
 }

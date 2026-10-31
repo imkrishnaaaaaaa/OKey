@@ -14,12 +14,12 @@
 
 import { SECURITY, SYNC } from '../../core/constants.js';
 import { bytesToBase64, base64ToBytes } from '../../core/encoding.js';
+import { createFillSessions } from './fill-session.js';
 
 const K = {
   DEK: 'okey_session_dek',
   EXPIRY: 'okey_session_expiry',
   MINI_EXPIRY: 'okey_session_mini_expiry',
-  VIEW: 'okey_session_view',
   POPUP_OPEN: 'okey_popup_open',
 };
 
@@ -42,7 +42,7 @@ export async function cacheDek(dekBytes, autoLockSeconds) {
   const settings = sStore['okey_settings'] || {};
 
   const extSeconds = clamp(settings.autoLockTimeout || autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
-  const miniSeconds = clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600);
+  const miniSeconds = clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
 
   const now = Date.now();
   await chrome.storage.session.set({
@@ -71,13 +71,15 @@ export async function touchSession(type = 'extension') {
   const now = Date.now();
   const exp = s[K.EXPIRY] || 0;
   const miniExp = s[K.MINI_EXPIRY] || 0;
-  if (now >= exp && now >= miniExp) {
-    await clearSession();
+  // A timer that has run out is never extended. Activity must not bring a locked
+  // view back, and activity on a web page must not keep the popup unlocked.
+  if (now >= (viewType === 'mini' ? miniExp : exp)) {
+    if (now >= exp && now >= miniExp) await clearSession();
     return false;
   }
 
   const autoLockSeconds = viewType === 'mini'
-    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600)
+    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS)
     : (settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS);
 
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
@@ -106,6 +108,9 @@ export async function touchSession(type = 'extension') {
 
   return true;
 }
+
+/** Activity on a web page. Only the page (mini) session, never the popup's. */
+export const touchPageSession = () => touchSession('mini');
 
 /**
  * Return the cached DEK bytes if still valid for the specified view type, else null.
@@ -142,7 +147,7 @@ export async function getCachedDek(type = 'extension', { touch = true } = {}) {
   if (!touch) return base64ToBytes(s[K.DEK]);
 
   const autoLockSeconds = viewType === 'mini'
-    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, 3600)
+    ? clamp(settings.miniAutoLockTimeout || 300, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS)
     : (settings.autoLockTimeout || SECURITY.DEFAULT_AUTO_LOCK_SECONDS);
 
   const seconds = clamp(autoLockSeconds, SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS);
@@ -165,12 +170,6 @@ export async function getCachedDek(type = 'extension', { touch = true } = {}) {
   }
 
   return base64ToBytes(s[K.DEK]);
-}
-
-export async function isUnlockedInSession() {
-  const s = await chrome.storage.session.get([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
-  const now = Date.now();
-  return !!s[K.DEK] && ((s[K.EXPIRY] && now < s[K.EXPIRY]) || (s[K.MINI_EXPIRY] && now < s[K.MINI_EXPIRY]));
 }
 
 export async function checkAndClearSessionIfExpired() {
@@ -201,15 +200,9 @@ export async function checkAndClearSessionIfExpired() {
 
 export async function clearSession() {
   await chrome.storage.session.remove([K.DEK, K.EXPIRY, K.MINI_EXPIRY]);
+  // A fill session holds a plaintext password. It must not outlive the lock.
+  await createFillSessions(chrome.storage.session).clearAll();
   await chrome.alarms.clear(SYNC.AUTO_LOCK_ALARM);
-}
-
-/** View state persistence (feedback #25). */
-export async function saveViewState(state) {
-  await chrome.storage.session.set({ [K.VIEW]: state });
-}
-export async function getViewState() {
-  return (await chrome.storage.session.get(K.VIEW))[K.VIEW] || null;
 }
 
 export async function setPopupOpen(open) {

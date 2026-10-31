@@ -138,9 +138,11 @@ export const STORAGE_KEYS = Object.freeze({
   KDF_PARAMS: 'okey_kdf_params',
   WRAPPED_BY_MASTER: 'okey_wrapped_master',
   WRAPPED_BY_RECOVERY: 'okey_wrapped_recovery',
+  LAST_RECOVERY_CHECK_AT: 'okey_last_recovery_check', // when the user last proved they still have the 24 words
+  RECOVERY_VERSION: 'okey_recovery_version', // counts new recovery keys, so sync can tell which wrap is newer
   VAULT_METADATA: 'okey_metadata',
   SETTINGS: 'okey_settings',
-  OFFLINE_QUEUE: 'okey_offline_queue',
+  LEGACY_OFFLINE_QUEUE: 'okey_offline_queue', // no longer written. Only deleted from old installs.
   LAST_SYNC_AT: 'okey_last_sync',
   RECENTS: 'okey_recents',
   THEME: 'okey_theme',

@@ -5,17 +5,17 @@
   "default_locale": "en",
   "description": "__MSG_appDescription__",
   "minimum_chrome_version": "110",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoSJVfyIhnF7w1Xnrnv8fR3UMOIkmRXhwFO1zGGr+x3gHaUzrhNQBcY+6O9iYOZHOD2tK40yTbqpYwpw1hYrzng/IayN/cctbI57lNn9aemWlqqG/kVDjbVuWq8Kg+9oni9bmSdkFvExb7BcPHGYsig/s69NK4x+PMZygeH7zKyKr/60dRp6VH+MBzZm68//k1qwsQKJIWIe/3mpItH/fDRgPFltt5pyk8YrkSpXhlVKWyIk63DuarnTyOSMHm+DQpU++ngpPpFcAd6ajbMhPobArNFXMjHT6gsrfxEMNNReABRQqrwWeF2U3Bxt+NMj/33UbdfEZVia25Q8il19lgwIDAQAB",
   "permissions": [
     "storage",
     "alarms",
     "idle",
-    "scripting",
-    "activeTab",
-    "tabs"
+    "tabs",
+    "offscreen",
+    "clipboardWrite",
+    "identity"
   ],
   "host_permissions": [
-    "https://script.google.com/*",
-    "https://script.googleusercontent.com/*",
     "https://www.google.com/s2/favicons*"
   ],
   "action": {
@@ -47,7 +47,8 @@
   "web_accessible_resources": [
     {
       "resources": ["unlock/unlock.html"],
-      "matches": ["http://*/*", "https://*/*"]
+      "matches": ["http://*/*", "https://*/*"],
+      "use_dynamic_url": true
     }
   ]
 }

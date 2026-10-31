@@ -7,7 +7,6 @@
  */
 
 import { PASSWORD_GEN } from './constants.js';
-import { randomBytes } from './crypto.js';
 import { wordlist } from '@scure/bip39/wordlists/english';
 
 const LOWER = 'abcdefghijklmnopqrstuvwxyz';
@@ -16,12 +15,12 @@ const DIGITS = '0123456789';
 
 /** Uniform random integer in [0, max) without modulo bias. */
 function randIntBelow(max) {
-  if (max <= 0) throw new RangeError('max must be > 0');
-  const limit = Math.floor(256 / max) * max;
-  // Pull bytes until one falls in the unbiased range.
+  if (max <= 0 || max > 2 ** 32) throw new RangeError('max must be in 1..2^32');
+  // 32-bit draws: a single byte cannot cover max > 256 (the wordlist is 2048).
+  const limit = Math.floor(2 ** 32 / max) * max;
   for (;;) {
-    const b = randomBytes(1)[0];
-    if (b < limit) return b % max;
+    const n = globalThis.crypto.getRandomValues(new Uint32Array(1))[0];
+    if (n < limit) return n % max;
   }
 }
 
@@ -95,7 +94,7 @@ export function generatePassphrase(options = {}) {
     out.push(w);
   }
   let phrase = out.join(separator);
-  if (options.includeNumber) phrase += separator + randIntBelow(9000) + 1000;
+  if (options.includeNumber) phrase += separator + (randIntBelow(9000) + 1000);
   return phrase;
 }
 
@@ -138,7 +137,7 @@ export function passphraseEntropyBits(wordCount, listSize = wordlist.length) {
 }
 
 /**
- * Strength level 1..5 and label from entropy bits.
+ * Strength level 1..4 and label from entropy bits.
  * @param {number} bits
  * @returns {{ level:number, label:string }}
  */

@@ -4,7 +4,7 @@
  * this shell only wires platform storage, sessions, and the service worker.
  */
 
-import { attachCore, mountCore } from '../ui/app-core.js';
+import { attachCore, mountCore, configureShell, relayout } from '../ui/app-core.js';
 import { mountNebula } from '../ui/nebula-canvas.js';
 import { Vault } from '../core/vault.js';
 import { IndexedDbAdapter } from './lib/idb-adapter.js';
@@ -17,6 +17,11 @@ const storage = new IndexedDbAdapter();
 attachCore({ storage, vault: new Vault(storage) });
 
 setSessionBridge({ cacheDek, getCachedDek, touchSession, clearSession });
+
+// Wide windows get a list and a detail side by side; every unlocked screen has an address.
+const TWO_PANE = matchMedia('(min-width: 1000px)');
+configureShell({ routing: true, twoPane: () => TWO_PANE.matches });
+TWO_PANE.addEventListener('change', relayout);
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});

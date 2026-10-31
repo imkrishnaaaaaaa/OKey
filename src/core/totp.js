@@ -115,6 +115,64 @@ export async function validateTOTP(secret, code, opts = {}) {
   return false;
 }
 
+const ALGO_NAMES = { SHA1: 'SHA-1', 'SHA-1': 'SHA-1', SHA256: 'SHA-256', 'SHA-256': 'SHA-256', SHA512: 'SHA-512', 'SHA-512': 'SHA-512' };
+
+/** What an account uses when it sets nothing special: 6 digits, 30 seconds, SHA-1. */
+export const DEFAULT_TOTP_PARAMS = Object.freeze({
+  totpDigits: CFG.DEFAULT_DIGITS,
+  totpPeriod: CFG.DEFAULT_PERIOD,
+  totpAlgorithm: CFG.DEFAULT_ALGORITHM,
+});
+
+/**
+ * Clean up TOTP settings from any source (an otpauth URI, an import, a synced
+ * payload). Bad values fall back to the defaults, so a code is never computed
+ * with NaN or an unknown hash.
+ * @param {{digits?:*, period?:*, algorithm?:*}} [raw]
+ * @returns {{totpDigits:number, totpPeriod:number, totpAlgorithm:string}}
+ */
+export function normalizeTotpParams({ digits, period, algorithm } = {}) {
+  const d = Number(digits);
+  const p = Number(period);
+  return {
+    totpDigits: [6, 7, 8].includes(d) ? d : DEFAULT_TOTP_PARAMS.totpDigits,
+    totpPeriod: Number.isInteger(p) && p >= 5 && p <= 300 ? p : DEFAULT_TOTP_PARAMS.totpPeriod,
+    totpAlgorithm: ALGO_NAMES[String(algorithm || '').toUpperCase()] || DEFAULT_TOTP_PARAMS.totpAlgorithm,
+  };
+}
+
+/** The entry's stored TOTP settings, cleaned. */
+export function pickTotpParams(entry) {
+  return normalizeTotpParams({ digits: entry?.totpDigits, period: entry?.totpPeriod, algorithm: entry?.totpAlgorithm });
+}
+
+/** Options for generateTOTP(secret, options) from an entry. */
+export function totpOptions(entry) {
+  const { totpDigits, totpPeriod, totpAlgorithm } = pickTotpParams(entry);
+  return { digits: totpDigits, period: totpPeriod, algorithm: totpAlgorithm };
+}
+
+/** True when the entry uses anything other than 6 digits, 30 seconds, SHA-1. */
+export function hasCustomTotp(entry) {
+  const p = pickTotpParams(entry);
+  return Object.keys(DEFAULT_TOTP_PARAMS).some((k) => p[k] !== DEFAULT_TOTP_PARAMS[k]);
+}
+
+/**
+ * Read what a user pasted into a TOTP field: a bare Base32 secret, or a whole
+ * otpauth:// URI (which also carries digits, period and algorithm).
+ * @returns {{secret:string, params:null|{totpDigits:number,totpPeriod:number,totpAlgorithm:string}}}
+ * @throws {ValidationError} on a broken otpauth URI
+ */
+export function parseTotpInput(text) {
+  const t = String(text || '').trim();
+  if (/^otpauth:\/\//i.test(t)) {
+    const p = parseOtpAuthUri(t);
+    return { secret: p.secret, params: normalizeTotpParams(p) };
+  }
+  return { secret: t.replace(/\s+/g, ''), params: null };
+}
+
 /**
  * Parse an otpauth:// URI.
  * @param {string} uri
@@ -150,12 +208,13 @@ export function parseOtpAuthUri(uri) {
 }
 
 /** Build an otpauth:// URI for export/QR. */
-export function buildOtpAuthUri({ secret, issuer, account, period = CFG.DEFAULT_PERIOD, digits = CFG.DEFAULT_DIGITS }) {
+export function buildOtpAuthUri({ secret, issuer, account, period = CFG.DEFAULT_PERIOD, digits = CFG.DEFAULT_DIGITS, algorithm = CFG.DEFAULT_ALGORITHM }) {
   const label = issuer ? `${issuer}:${account}` : account;
   const params = new URLSearchParams({ secret });
   if (issuer) params.set('issuer', issuer);
   if (period !== 30) params.set('period', String(period));
   if (digits !== 6) params.set('digits', String(digits));
+  if (algorithm !== CFG.DEFAULT_ALGORITHM) params.set('algorithm', algorithm.replace('-', ''));
   return `otpauth://totp/${encodeURIComponent(label)}?${params.toString()}`;
 }
 

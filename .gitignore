@@ -21,3 +21,7 @@ yarn-error.log*
 # Local assistant config
 .opencode/
 opencode.json
+
+# Old product planning, kept on disk for history but not in the repo
+prd.md
+implementation_plan.md

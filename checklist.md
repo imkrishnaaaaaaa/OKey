@@ -41,7 +41,7 @@ One task at a time. Mark ✅ only when built AND verified (build/tests/screensho
 
 ## Phase 7 — Quality & ship
 - [x] 7.1 Test suite extended (cloud store + sync controller); 42/42 green; both targets build ✅
-- [x] 7.2 Visual pass on shared screens (PWA host): welcome, PIN create/confirm, recovery grid, tour, lock, empty list, populated list w/ live TOTP, detail (dark+light), edit form, settings — all verified via screenshots ✅ (extension loads the same modules; owner load-unpacked pass pending)
+- [x] 7.2 Visual pass on shared screens (PWA host): welcome, PIN create/confirm, recovery grid, tour, lock, empty list, populated list w/ live TOTP, detail, edit form, settings — all verified via screenshots ✅ (extension loads the same modules; owner load-unpacked pass pending)
 - [x] 7.3 Popup bundle 600 KB incl. Firebase auth SDK (budget 900 KB) ✅
 - [x] 7.4 Review fixes landed: shared app-core extraction, session bridge, storage injection, font paths, floating-label collision, TOTP ticker anchors, header crowding, settings crash (firebaseReady import) ✅
 - [x] 7.5 Handover notes in final summary + `src/lib/firebase-config.js` comments + `docs/architecture.md` ✅

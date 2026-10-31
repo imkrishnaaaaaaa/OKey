@@ -9,6 +9,10 @@
  * Bundled to a classic IIFE — no runtime ES imports in the page context.
  */
 
+import { findFillTargets } from './fill-targets.js';
+import { isOtpFieldLike, isNewPasswordField } from './field-kinds.js';
+import { createFillGuard } from './fill-guard.js';
+import { latestOnly } from '../../ui/latest.js';
 import { generatePassword } from '../../core/password-generator.js';
 import { isValidTotpSecret } from '../../core/totp.js';
 import { MSG } from '../lib/messages.js';
@@ -20,6 +24,7 @@ const repositionRegistry = new Set(); // all active reposition fns for global re
 let panelEl = null;
 let settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
 let activeSessionCred = null;
+const guard = createFillGuard(); // fill each box once, submit once per session
 let activeSessionTime = 0;
 let singleMatchAttempted = false;
 
@@ -44,10 +49,9 @@ async function triggerSingleMatchAutofill() {
 
   const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS }).catch(() => null);
   if (res && !res.locked && res.matches && res.matches.length === 1) {
-    const cred = res.matches[0];
     // Never silently fill an invisible field (revamp H8).
     if (isVisiblyFillable(anchorEl)) {
-      fillAndRememberCredential(anchorEl, cred);
+      fillAndRememberCredential(anchorEl, res.matches[0], false);
     }
   }
 }
@@ -70,12 +74,7 @@ function isUsernameField(el) {
   const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder} ${aria} ${jsname}`.toLowerCase();
   return /user|email|login|account|phone|mobile|identifier/.test(hay) || el.autocomplete === 'username';
 }
-function isTotpField(el) {
-  if (el.tagName !== 'INPUT') return false;
-  if (!['text', 'number', 'tel'].includes(el.type)) return false;
-  const hay = `${el.name} ${el.id} ${el.autocomplete} ${el.placeholder} ${el.className}`.toLowerCase();
-  return /totp|2fa|otp|auth|code|verification|factor|secure|pin/.test(hay) || el.autocomplete === 'one-time-code';
-}
+function isTotpField(el) { return isOtpFieldLike(el); }
 
 function isButtonLike(el) {
   if (el.tagName !== 'INPUT') return false;
@@ -132,30 +131,15 @@ function findSubmitButton(anchorEl) {
     }
   }
 
-  // 3. Fallback to document level
-  for (const sel of selectors) {
-    const btn = document.querySelector(sel);
-    if (btn) return btn;
-  }
-  const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
-  for (const btn of buttons) {
-    const text = btn.tagName === 'INPUT' ? btn.value : btn.textContent;
-    if (keywords.some(regex => regex.test(text))) {
-      return btn;
-    }
-  }
-
+  // No page-wide search: a button far from this form is not this form's button.
   return null;
 }
 
 function submitForm(anchorEl) {
   const btn = findSubmitButton(anchorEl);
   if (btn) {
-    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
-      btn.disabled = false;
-      btn.removeAttribute('disabled');
-      btn.setAttribute('aria-disabled', 'false');
-    }
+    // A disabled button is the site saying "not yet". Never force it open.
+    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
     btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     btn.click();
@@ -163,8 +147,7 @@ function submitForm(anchorEl) {
   }
 
   // Fallback 1: Dispatch Enter keyboard events on the password field or anchorEl
-  const form = anchorEl.form || document;
-  const pwField = isPasswordField(anchorEl) ? anchorEl : form.querySelector('input[type=password]');
+  const pwField = isPasswordField(anchorEl) ? anchorEl : anchorEl.form?.querySelector('input[type=password]');
   const targetInput = pwField || anchorEl;
   if (targetInput) {
     const opts = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
@@ -178,6 +161,16 @@ function submitForm(anchorEl) {
     anchorEl.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     try { anchorEl.form.submit(); } catch (e) { console.warn("OKey form.submit() failed:", e); }
   }
+}
+
+/** Auto-submit at most once per fill session, and remember it for later pages of the session. */
+function submitOnce(el) {
+  if (!settings.autoSubmitEnabled || !guard.canSubmit()) return;
+  guard.markSubmitted();
+  if (activeSessionCred) {
+    chrome.runtime.sendMessage({ type: MSG.SET_ACTIVE_FILLING_SESSION, cred: activeSessionCred, submitted: true }).catch(() => {});
+  }
+  setTimeout(() => submitForm(el), 150);
 }
 
 function repositionAll() {
@@ -198,11 +191,13 @@ function attach(el) {
 
   tracked.set(el, null); // placeholder; updated below
 
-  // Prevent browser's native password/autofill manager popup from overlapping
-  if (isPasswordField(el)) {
-    el.setAttribute('autocomplete', 'new-password');
-  } else {
-    el.setAttribute('autocomplete', 'off');
+  // Prevent browser's native password/autofill manager popup from overlapping.
+  // Keep what the page said (field-kinds reads it back), and never touch a box
+  // that asks for passkeys: overwriting "username webauthn" hides passkey suggestions.
+  const pageAutocomplete = el.getAttribute('autocomplete') || '';
+  el.dataset.okeyAutocomplete = pageAutocomplete;
+  if (!/webauthn/i.test(pageAutocomplete)) {
+    el.setAttribute('autocomplete', isPasswordField(el) ? 'new-password' : 'off');
   }
 
   const badge = document.createElement('div');
@@ -260,11 +255,20 @@ function attach(el) {
   const ro = new ResizeObserver(() => { reposition(); });
   ro.observe(el);
 
-  // Clean up from registry when the input is removed from DOM
+  // When the input leaves the page (single-page apps do this constantly), drop
+  // everything we attached for it, or listeners and observers pile up.
   const removalObserver = new MutationObserver(() => {
     if (!document.contains(el)) {
       repositionRegistry.delete(reposition);
+      el.removeEventListener('focus', show);
+      el.removeEventListener('blur', hideSoon);
+      el.removeEventListener('input', reposition);
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+      ro.disconnect();
       removalObserver.disconnect();
+      badge.remove();
+      tracked.delete(el); // so the same input can be attached again if the page re-inserts it
     }
   });
   removalObserver.observe(document, { childList: true, subtree: true });
@@ -273,6 +277,8 @@ function attach(el) {
   badge.classList.add('okey-badge');
   badge.addEventListener('click', async (e) => {
     e.stopPropagation();
+    // Only a real click. The page can call badge.click() itself, and that must not open the picker.
+    if (!e.isTrusted) return;
     openPanel(el, badge);
   });
 
@@ -280,19 +286,11 @@ function attach(el) {
   badge.style.display = 'none';
 
   // Auto-fill dynamic multi-step fields if active session exists
-  if (activeSessionCred && (Date.now() - activeSessionTime < 60000)) {
-    if (isPasswordField(el) && !el.value) {
+  if (activeSessionCred && (Date.now() - activeSessionTime < 60000) && isVisiblyFillable(el)) {
+    if (isPasswordField(el) && !el.value && !isNewPasswordField(el) && guard.canFill(el)) {
+      guard.markFilled(el);
       setValue(el, activeSessionCred.password);
-      if (settings.autoSubmitEnabled) {
-        setTimeout(() => submitForm(el), 150);
-      }
-    } else if (isTotpField(el) && !el.value) {
-      if (activeSessionCred.totpCode) {
-        setValue(el, activeSessionCred.totpCode);
-        if (settings.autoSubmitEnabled) {
-          setTimeout(() => submitForm(el), 150);
-        }
-      }
+      submitOnce(el);
     }
   }
 }
@@ -305,11 +303,15 @@ function fillGenerated(passwordEl) {
   if (confirm) setValue(confirm, pw);
   toast('Strong password filled & copied');
   navigator.clipboard?.writeText(pw).catch(() => {});
+  // The worker clears it after the time the user chose (the page cannot, it may be closed by then).
+  chrome.runtime.sendMessage({ type: MSG.COPY_TO_CLIPBOARD }).catch(() => {});
 }
 
-async function openPanel(anchorEl, badge) {
+const openPanel = latestOnly(async (isCurrent, anchorEl, badge) => {
   closePanel();
   const res = await chrome.runtime.sendMessage({ type: MSG.GET_SITE_CREDENTIALS }).catch(() => null);
+  // A second click on the badge while this one waited: the newer call builds the panel.
+  if (!isCurrent()) return;
 
   if (res && res.settings) {
     settings = { ...settings, ...res.settings };
@@ -322,6 +324,12 @@ async function openPanel(anchorEl, badge) {
     ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : settings.theme;
   panelEl.setAttribute('data-theme', resolvedTheme || 'dark');
+
+  if (res?.insecure) {
+    panelEl.appendChild(header('OKey does not fill on pages that are not https'));
+    positionAndShow(badge);
+    return;
+  }
 
   if (!res || res.locked) {
     panelEl.appendChild(header('OKey is locked'));
@@ -402,7 +410,7 @@ async function openPanel(anchorEl, badge) {
 
       if (matchedFiltered.length) {
         listContainer.appendChild(header(`For ${location.hostname.replace(/^www\./, '')}`));
-        matchedFiltered.forEach((c) => listContainer.appendChild(credRow(c, anchorEl)));
+        matchedFiltered.forEach((c) => listContainer.appendChild(credRow(c, anchorEl, false)));
       } else if (!q) {
         listContainer.appendChild(header('No saved logins for this site'));
       }
@@ -410,7 +418,7 @@ async function openPanel(anchorEl, badge) {
       if (othersFiltered.length) {
         listContainer.appendChild(header('Other logins'));
         const displayOthers = q ? othersFiltered : othersFiltered.slice(0, 3);
-        displayOthers.forEach((c) => listContainer.appendChild(credRow(c, anchorEl)));
+        displayOthers.forEach((c) => listContainer.appendChild(credRow(c, anchorEl, true)));
       }
     };
 
@@ -437,11 +445,15 @@ async function openPanel(anchorEl, badge) {
     setTimeout(() => searchInput.focus(), 50);
 
   positionAndShow(badge);
-}
+});
 
 function onDocClick(e) { if (panelEl && !panelEl.contains(e.target)) closePanel(); }
 // Clean up panel
-function closePanel() { panelEl?.remove(); panelEl = null; }
+function closePanel() {
+  panelEl?.remove();
+  panelEl = null;
+  document.removeEventListener('click', onDocClick);
+}
 
 /** Anchor the panel under the badge and mount it. */
 function positionAndShow(badge) {
@@ -450,7 +462,9 @@ function positionAndShow(badge) {
   panelEl.style.left = `${Math.max(8, window.scrollX + r.right - 280)}px`;
   panelEl.style.top = `${window.scrollY + r.bottom + 6}px`;
   document.body.appendChild(panelEl);
-  setTimeout(() => document.addEventListener('click', onDocClick, { once: true }), 0);
+  // Stays until closePanel. A one-time listener was used up by the first click
+  // INSIDE the panel, after which a click outside no longer closed it.
+  setTimeout(() => { if (panelEl) document.addEventListener('click', onDocClick); }, 0);
 }
 
 function escapeHtml(str) {
@@ -461,20 +475,6 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
-}
-
-function findUsernameValue(anchorEl) {
-  const form = anchorEl.form || document;
-  const userField = isUsernameField(anchorEl) ? anchorEl
-    : [...form.querySelectorAll('input')].find(isUsernameField);
-  return userField ? userField.value : '';
-}
-
-function findPasswordValue(anchorEl) {
-  const form = anchorEl.form || document;
-  const pwField = isPasswordField(anchorEl) ? anchorEl
-    : form.querySelector('input[type=password]');
-  return pwField ? pwField.value : '';
 }
 
 function closeAddModal() {
@@ -547,7 +547,8 @@ function openAddModal(anchorEl) {
     }
   });
 
-  modal.querySelector('#okey-add-gen').addEventListener('click', () => {
+  modal.querySelector('#okey-add-gen').addEventListener('click', (e) => {
+    if (!e.isTrusted) return;
     const pwInput = modal.querySelector('#okey-add-password');
     pwInput.value = generatePassword(settings.passwordGeneratorDefaults || { length: 20 });
   });
@@ -556,7 +557,9 @@ function openAddModal(anchorEl) {
     closeAddModal();
   });
 
-  modal.querySelector('#okey-add-save').addEventListener('click', async () => {
+  modal.querySelector('#okey-add-save').addEventListener('click', async (e) => {
+    // A page script must not be able to fill this form and press Save to plant a login.
+    if (!e.isTrusted) return;
     const siteName = modal.querySelector('#okey-add-sitename').value.trim();
     const domain = modal.querySelector('#okey-add-domain').value.trim();
     const username = modal.querySelector('#okey-add-username').value.trim();
@@ -586,7 +589,8 @@ function openAddModal(anchorEl) {
 
     if (res && res.success && res.entry) {
       closeAddModal();
-      fillAndRememberCredential(anchorEl, res.entry);
+      // The user just made this login by hand, so it is allowed even if its domain differs.
+      fillAndRememberCredential(anchorEl, res.entry, true);
       toast('Saved & filled by OKey');
     } else {
       alert(res?.error || 'Failed to save credential. Please ensure OKey is unlocked.');
@@ -606,40 +610,48 @@ function row(title, sub, onclick) {
   d.innerHTML = `<div class="okey-panel-title"></div><div class="okey-panel-sub"></div>`;
   d.querySelector('.okey-panel-title').textContent = title;
   d.querySelector('.okey-panel-sub').textContent = sub || '';
-  if (onclick) d.addEventListener('click', onclick);
+  // Rows fill, save or generate, so only a real click may trigger them.
+  if (onclick) d.addEventListener('click', (e) => { if (e.isTrusted) onclick(e); });
   return d;
 }
-function fillAndRememberCredential(anchorEl, cred) {
+/**
+ * The list the page gets has names only. The secret for ONE login is asked for
+ * here, after a click. `picked` is true only for a login the user chose from the
+ * "other logins" list, which the service worker otherwise refuses on this site.
+ */
+async function fetchSecret(id, picked) {
+  const res = await chrome.runtime.sendMessage({ type: MSG.GET_CREDENTIAL_SECRET, id, picked }).catch(() => null);
+  return res?.success ? res.cred : null;
+}
+
+async function fillAndRememberCredential(anchorEl, summary, picked) {
+  const cred = await fetchSecret(summary.id, picked);
+  if (!cred) { toast('Could not fill. OKey may be locked.'); return; }
+  guard.reset(); // the user picked a login: a new session
   activeSessionCred = cred;
   activeSessionTime = Date.now();
   chrome.runtime.sendMessage({ type: MSG.SET_ACTIVE_FILLING_SESSION, cred }).catch(() => {});
   fillCredential(anchorEl, cred);
   startAutofillPolling();
-  if (settings.autoSubmitEnabled) {
-    setTimeout(() => submitForm(anchorEl), 150);
-  }
+  submitOnce(anchorEl);
 }
-function credRow(cred, anchorEl) {
+function credRow(cred, anchorEl, picked) {
   const d = row(cred.siteName || cred.domain, cred.username || '(no username)', () => {
-    fillAndRememberCredential(anchorEl, cred);
+    fillAndRememberCredential(anchorEl, cred, picked);
     closePanel();
   });
   return d;
 }
 
-/** Fill both username and password fields related to the anchor input. */
+/** Fill the username, password and code boxes that belong to the clicked box. */
 function fillCredential(anchorEl, cred) {
-  const form = anchorEl.form || document;
-  const pwField = isPasswordField(anchorEl) ? anchorEl : form.querySelector('input[type=password]');
-  const userField = isUsernameField(anchorEl) ? anchorEl
-    : [...form.querySelectorAll('input')].find(isUsernameField);
-  if (userField && cred.username) setValue(userField, cred.username);
-  if (pwField && cred.password) setValue(pwField, cred.password);
-
-  const totpEl = [...form.querySelectorAll('input')].find(isTotpField);
-  if (totpEl && cred.totpCode) {
-    setValue(totpEl, cred.totpCode);
-  }
+  const scope = anchorEl.form || closestContainer(anchorEl, 4);
+  const { user, password, totp } = findFillTargets(anchorEl, scope, {
+    username: isUsernameField, password: isPasswordField, totp: isTotpField, fillable: isVisiblyFillable,
+  });
+  if (user && cred.username) { guard.markFilled(user); setValue(user, cred.username); }
+  if (password && cred.password && !isNewPasswordField(password)) { guard.markFilled(password); setValue(password, cred.password); }
+  if (totp && cred.totpCode) { guard.markFilled(totp); setValue(totp, cred.totpCode); }
   toast('Filled by OKey');
 }
 
@@ -701,23 +713,21 @@ function startAutofillPolling() {
     for (const el of inputs) {
       if (isButtonLike(el)) continue;
 
-      if (isPasswordField(el) && pollFillable(el) && !el.value) {
+      if (isPasswordField(el) && pollFillable(el) && !el.value && !isNewPasswordField(el) && guard.canFill(el)) {
+        guard.markFilled(el);
         setValue(el, activeSessionCred.password);
         toast('Autofilled by OKey');
-        if (settings.autoSubmitEnabled) {
-          setTimeout(() => submitForm(el), 150);
-        }
+        submitOnce(el);
       }
-      else if (isTotpField(el) && pollFillable(el) && !el.value) {
+      else if (isTotpField(el) && pollFillable(el) && !el.value && guard.canFill(el)) {
         if (activeSessionCred.totpCode) {
+          guard.markFilled(el);
           setValue(el, activeSessionCred.totpCode);
           toast('Autofilled by OKey');
+          submitOnce(el);
           chrome.runtime.sendMessage({ type: MSG.CLEAR_ACTIVE_FILLING_SESSION }).catch(() => {});
           activeSessionCred = null;
           stopAutofillPolling();
-          if (settings.autoSubmitEnabled) {
-            setTimeout(() => submitForm(el), 150);
-          }
         }
       }
     }
@@ -774,7 +784,9 @@ const mo = new MutationObserver((muts) => {
 
 function bindContentActivityTracking() {
   let lastTouch = 0;
-  const touch = () => {
+  const touch = (e) => {
+    // A page script can fire these events itself, so only real ones count.
+    if (!e.isTrusted) return;
     const now = Date.now();
     if (now - lastTouch < 10000) return; // throttle to once every 10 seconds
     lastTouch = now;
@@ -842,6 +854,7 @@ chrome.runtime.sendMessage({ type: MSG.GET_ACTIVE_FILLING_SESSION }).then((res) 
   if (res?.success && res.session) {
     activeSessionCred = res.session.cred;
     activeSessionTime = res.session.timestamp;
+    guard.submitted = res.session.submitted === true; // do not submit again on a later page
     startAutofillPolling();
   }
 }).catch(() => {});

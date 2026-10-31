@@ -7,38 +7,53 @@
  */
 
 import { ENTRY_TYPES } from './constants.js';
-import { parseOtpAuthUri } from './totp.js';
+import { parseOtpAuthUri, parseTotpInput, normalizeTotpParams, hasCustomTotp, buildOtpAuthUri } from './totp.js';
 import { normalizeDomain } from './domain-matcher.js';
 import { nowIso } from './util.js';
+import { ValidationError } from './errors.js';
+
+/** The backup file format this version writes and reads. */
+const BACKUP_VERSION = 2;
 
 // ---- CSV parsing ----
 
-function parseCsvLine(line) {
-  const out = [];
+/**
+ * Parse CSV text into rows of cells, one character at a time, so a quoted cell
+ * can hold commas, quotes ("") and line breaks. Blank lines are skipped.
+ */
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
   let cur = '';
   let q = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (q && line[i + 1] === '"') {
-        cur += '"';
-        i++;
-      } else q = !q;
-    } else if (ch === ',' && !q) {
-      out.push(cur);
-      cur = '';
+  const endRow = () => {
+    row.push(cur);
+    cur = '';
+    if (row.some((c) => c.trim())) rows.push(row);
+    row = [];
+  };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"' && text[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') q = false;
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      endRow();
     } else cur += ch;
   }
-  out.push(cur);
-  return out;
+  if (cur || row.length) endRow();
+  return rows;
 }
 
 function parseCsv(csv) {
-  const lines = csv.split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length < 2) return [];
-  const headers = parseCsvLine(lines[0]).map((h) => h.toLowerCase().trim());
-  return lines.slice(1).map((line) => {
-    const values = parseCsvLine(line);
+  const rows = parseCsvRows(csv);
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((h) => h.toLowerCase().trim());
+  return rows.slice(1).map((values) => {
     const row = {};
     headers.forEach((h, i) => (row[h] = (values[i] || '').trim()));
     return row;
@@ -73,7 +88,7 @@ export function importLastPass(csv) {
       username: r.username || '',
       password: r.password || '',
       totpSecret: r.totp || '',
-      entryType: r.totp ? ENTRY_TYPES.PASSWORD : ENTRY_TYPES.PASSWORD,
+      entryType: ENTRY_TYPES.PASSWORD,
       tags: tag('imported', 'lastpass', r.grouping),
       notes: r.extra || '',
       isFavorite: r.fav === '1',
@@ -105,13 +120,17 @@ export function importBitwarden(jsonText) {
     .map((it) => {
       const login = it.login || {};
       const uri = (login.uris || [])[0]?.uri || '';
+      // Bitwarden stores an otpauth:// URI here when the account is not 6 digits / 30 s / SHA-1.
+      let totp = { secret: login.totp || '', params: null };
+      try { totp = parseTotpInput(login.totp); } catch { /* keep the raw text */ }
       return {
         siteName: it.name || '',
         domain: uri ? normalizeDomain(uri) : '',
         username: login.username || '',
         password: login.password || '',
-        totpSecret: login.totp || '',
-        entryType: login.totp ? ENTRY_TYPES.PASSWORD : ENTRY_TYPES.PASSWORD,
+        totpSecret: totp.secret,
+        ...(totp.params || {}),
+        entryType: ENTRY_TYPES.PASSWORD,
         tags: tag('imported', 'bitwarden'),
         notes: it.notes || '',
         isFavorite: !!it.favorite,
@@ -133,6 +152,7 @@ export function importOtpAuthUris(text) {
           domain: p.issuer ? normalizeDomain(p.issuer) : '',
           username: p.account || '',
           totpSecret: p.secret,
+          ...normalizeTotpParams(p),
           entryType: ENTRY_TYPES.TOTP,
           tags: tag('imported', 'authenticator'),
           notes: p.issuer ? `Issuer: ${p.issuer}` : '',
@@ -144,11 +164,38 @@ export function importOtpAuthUris(text) {
     .filter(Boolean);
 }
 
-/** OKey native encrypted backup of a single vault's records (ciphertext stays encrypted). */
+/**
+ * Read an OKey backup file (made by exportOkeyBackup). Checks everything the
+ * restore will rely on before any of it is used, and says what is wrong in plain
+ * words. It never returns a half-valid file.
+ * @returns {{ version: number, salt: string, kdfParams: object|null, wrappedRecovery: string, records: object[] }}
+ * @throws {ValidationError}
+ */
 export function importOkeyBackup(jsonText) {
-  const data = JSON.parse(jsonText);
-  if (data.format !== 'okey') throw new Error('Not an OKey backup file');
-  return data; // { format, version, exportedAt, salt, kdfParams, wrappedMaster, wrappedRecovery, records }
+  let data;
+  try {
+    data = JSON.parse(jsonText);
+  } catch {
+    throw new ValidationError('This file is not valid JSON, so it is not an OKey backup');
+  }
+  if (!data || typeof data !== 'object' || data.format !== 'okey') {
+    throw new ValidationError('This is not an OKey backup file');
+  }
+  if (!Number.isInteger(data.version) || data.version > BACKUP_VERSION) {
+    throw new ValidationError('This backup was made by a newer version of OKey. Update OKey and try again');
+  }
+  const damaged = (what) => new ValidationError(`This backup file is damaged (missing ${what})`);
+  if (typeof data.salt !== 'string' || !data.salt) throw damaged('the salt');
+  if (typeof data.wrappedRecovery !== 'string' || !data.wrappedRecovery) throw damaged('the recovery key part');
+  if (!Array.isArray(data.records)) throw damaged('the records');
+  if (data.records.some((r) => !r || typeof r.id !== 'string' || typeof r.payload !== 'string')) throw damaged('some records');
+  return {
+    version: data.version,
+    salt: data.salt,
+    kdfParams: data.kdfParams && typeof data.kdfParams === 'object' ? data.kdfParams : null,
+    wrappedRecovery: data.wrappedRecovery,
+    records: data.records,
+  };
 }
 
 // ---- Exporters ----
@@ -174,6 +221,16 @@ export function exportCsv(entries) {
   return [headers.join(','), ...rows].join('\n');
 }
 
+/** Bare secret for default settings, otpauth:// URI otherwise, so digits/period/algorithm survive. */
+function bitwardenTotp(e) {
+  if (!e.totpSecret) return null;
+  if (!hasCustomTotp(e)) return e.totpSecret;
+  return buildOtpAuthUri({
+    secret: e.totpSecret, issuer: e.siteName || e.domain || 'OKey', account: e.username || 'account',
+    digits: e.totpDigits, period: e.totpPeriod, algorithm: e.totpAlgorithm,
+  });
+}
+
 /** Bitwarden-compatible plaintext JSON export. */
 export function exportBitwardenJson(entries) {
   const items = entries
@@ -187,17 +244,21 @@ export function exportBitwardenJson(entries) {
         uris: e.domain ? [{ match: null, uri: `https://${e.domain}` }] : [],
         username: e.username || null,
         password: e.password || null,
-        totp: e.totpSecret || null,
+        totp: bitwardenTotp(e),
       },
       fields: (e.customFields || []).map((f) => ({ name: f.label, value: f.value, type: f.hidden ? 1 : 0 })),
     }));
   return JSON.stringify({ encrypted: false, folders: [], items }, null, 2);
 }
 
-/** Encrypted native backup — records stay ciphertext; only the user's secrets can open them. */
-export function exportOkeyBackup({ salt, kdfParams, wrappedMaster, wrappedRecovery, records }) {
+/**
+ * Encrypted native backup. Records stay ciphertext. The key is wrapped by the
+ * 24 recovery words only: a 4-digit PIN wrap in a file could be brute-forced
+ * offline, so wrappedMaster is never written here.
+ */
+export function exportOkeyBackup({ salt, kdfParams, wrappedRecovery, records }) {
   return JSON.stringify(
-    { format: 'okey', version: 2, exportedAt: nowIso(), salt, kdfParams, wrappedMaster, wrappedRecovery, records },
+    { format: 'okey', version: BACKUP_VERSION, exportedAt: nowIso(), salt, kdfParams, wrappedRecovery, records },
     null,
     2,
   );

@@ -27,57 +27,44 @@ export class IndexedDbAdapter {
     this._db = null;
   }
 
-  async _store(mode) {
-    if (!this._db) this._db = await openDb();
-    return this._db.transaction(STORE, mode).objectStore(STORE);
+  /**
+   * Run `work(store)` in one transaction and resolve only after it COMMITS.
+   * A request succeeding is not enough: the commit can still fail (quota), and
+   * saying "saved" before that would lose a vault write without a word. A failed
+   * request or an aborted transaction rejects. It is never turned into "no data".
+   * @param {'readonly'|'readwrite'} mode
+   * @param {(store: IDBObjectStore) => IDBRequest[]} work returns the requests to read results from
+   * @returns {Promise<IDBRequest[]>}
+   */
+  async _tx(mode, work) {
+    if (!this._db) {
+      this._db = await openDb();
+      this._db.onclose = () => { this._db = null; }; // reopen on the next call
+    }
+    return new Promise((resolve, reject) => {
+      const tx = this._db.transaction(STORE, mode);
+      let requests = [];
+      tx.oncomplete = () => resolve(requests);
+      tx.onerror = (e) => reject(e?.target?.error || tx.error || new Error('IndexedDB request failed'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+      requests = work(tx.objectStore(STORE));
+    });
   }
 
   async get(keys) {
     const list = Array.isArray(keys) ? keys : [keys];
-    const store = await this._store('readonly');
+    const requests = await this._tx('readonly', (store) => list.map((k) => store.get(k)));
     const out = {};
-    await Promise.all(
-      list.map(
-        (k) =>
-          new Promise((resolve) => {
-            const req = store.get(k);
-            req.onsuccess = () => {
-              if (req.result !== undefined) out[k] = req.result;
-              resolve();
-            };
-            req.onerror = () => resolve();
-          }),
-      ),
-    );
+    requests.forEach((req, i) => { if (req.result !== undefined) out[list[i]] = req.result; });
     return out;
   }
 
   async set(items) {
-    const store = await this._store('readwrite');
-    await Promise.all(
-      Object.entries(items).map(
-        ([k, v]) =>
-          new Promise((resolve, reject) => {
-            const req = store.put(v, k);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-          }),
-      ),
-    );
+    await this._tx('readwrite', (store) => Object.entries(items).map(([k, v]) => store.put(v, k)));
   }
 
   async remove(keys) {
     const list = Array.isArray(keys) ? keys : [keys];
-    const store = await this._store('readwrite');
-    await Promise.all(
-      list.map(
-        (k) =>
-          new Promise((resolve) => {
-            const req = store.delete(k);
-            req.onsuccess = () => resolve();
-            req.onerror = () => resolve();
-          }),
-      ),
-    );
+    await this._tx('readwrite', (store) => list.map((k) => store.delete(k)));
   }
 }

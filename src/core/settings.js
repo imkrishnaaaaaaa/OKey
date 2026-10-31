@@ -15,7 +15,7 @@ const NUMERIC_RANGES = {
   clipboardClearTimeout: [SECURITY.MIN_CLIPBOARD_CLEAR_SECONDS, SECURITY.MAX_CLIPBOARD_CLEAR_SECONDS],
   syncIntervalMinutes: [SYNC.MIN_INTERVAL_MINUTES, SYNC.MAX_INTERVAL_MINUTES],
   recentsMaxCount: [1, 100],
-  miniAutoLockTimeout: [SECURITY.MIN_AUTO_LOCK_SECONDS, 3600],
+  miniAutoLockTimeout: [SECURITY.MIN_AUTO_LOCK_SECONDS, SECURITY.MAX_AUTO_LOCK_SECONDS],
 };
 
 const BOOLEAN_KEYS = ['biometricEnabled', 'autoSyncEnabled', 'showRecents', 'faviconsEnabled', 'autoSubmitEnabled', 'autoFillSingleMatch'];

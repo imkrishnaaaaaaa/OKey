@@ -61,10 +61,10 @@ Server sees ciphertext + non-sensitive metadata only.
 
 ```
 users/{uid}                     → { email, createdAt, displayName }
-users/{uid}/vault/meta          → { salt, kdfParams, wrappedMaster,
-                                    wrappedRecovery, formatVersion, updatedAt }
+users/{uid}/vault/meta          → { salt, kdfParams, wrappedRecovery,
+                                    formatVersion, updatedAt }  /* no PIN wrap */
 users/{uid}/vault/settings      → { <allowlisted settings>, updatedAt }
-users/{uid}/vault/entries/{id}  → { id, domain, folder, entryType, version,
+users/{uid}/entries/{id}        → { id, domain, folder, entryType, version,
                                     isDeleted, updatedAt, displayOrder,
                                     isPinned, payload /* AES-GCM b64 */ }
 ```
@@ -78,7 +78,7 @@ list-all access across users.
 * Delta: pull entries with `updatedAt > lastSyncAt`; push local changes with
   `version++`. Last-writer-wins by (version, updatedAt) — identical semantics
   to v1, new transport (`core/cloud.js`).
-* Offline queue persists; flushes on reconnect/sign-in.
+* No offline queue: a failed sync throws before the cursor moves and the next sync repeats it (see docs/architecture.md §5).
 * Realtime: one Firestore snapshot listener on the active vault's entries
   updates open UIs live (multi-device feels instant).
 * Conflict surfacing unchanged (toast + last-writer-wins).

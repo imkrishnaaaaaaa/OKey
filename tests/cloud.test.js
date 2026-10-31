@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CloudStore, CloudError, toFsFields, fromFsFields,
+  CloudStore, CloudError, toFsFields, fromFsFields, SYNC_EPOCH,
 } from '../src/core/cloud.js';
 import { CloudSync } from '../src/core/cloud-sync.js';
+import { STORAGE_KEYS, DEFAULT_SETTINGS } from '../src/core/constants.js';
+import { mergeRemoteSettings } from '../src/core/settings.js';
+import { memoryFirestore } from './helpers.js';
 
 const PID = 'demo-project';
 const UID = 'user-1';
@@ -46,27 +49,74 @@ test('pullMeta decodes kdfParams JSON blob', async () => {
   assert.deepEqual(out.kdfParams, { type: 'argon2id', time: 3 });
 });
 
-test('pushEntries batches records with correct doc paths and payload', async () => {
-  const seenPaths = [];
-  const { store, calls } = mockStore((path) => { seenPaths.push(path); return {}; });
+const writesOf = (call) => JSON.parse(call.init.body).writes.map((w) => w.update);
+
+test('pushEntries writes the right doc name, fields and payload', async () => {
+  const { store, calls } = mockStore(() => ({}));
   await store.pushEntries(UID, [
     { id: 'e/1', domain: 'github.com', version: 2, isDeleted: false, updatedAt: '2026-01-01T00:00:00.000Z', displayOrder: 0, isPinned: true, folder: 'Dev', payload: 'CT!' },
   ]);
-  assert.ok(seenPaths[0].includes('/vault/entries/e%2F1'));
-  const body = JSON.parse(calls[0].init.body);
-  assert.equal(body.fields.payload.stringValue, 'CT!');
-  assert.equal(body.fields.version.integerValue, '2');
-  assert.equal(body.fields.isPinned.booleanValue, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, ':commit');
+  const [doc] = writesOf(calls[0]);
+  assert.equal(doc.name, `projects/${PID}/databases/(default)/documents/users/${UID}/entries/e%2F1`);
+  assert.equal(doc.fields.payload.stringValue, 'CT!');
+  assert.equal(doc.fields.version.integerValue, '2');
+  assert.equal(doc.fields.isPinned.booleanValue, true);
 });
 
-test('runQuery delta maps documents to at-rest records', async () => {
-  const { store } = mockStore(() => ([
-    { document: { name: `projects/${PID}/databases/(default)/documents/users/${UID}/vault/entries/abc`, fields: toFsFields({ id: 'abc', domain: 'x.com', version: 3, isDeleted: false, updatedAt: '2026-02-01T00:00:00.000Z', displayOrder: 1, isPinned: false, folder: '', entryType: 'password', payload: 'P' }) } },
+test('pushEntries sends every record, in commits under the 500-write limit', async () => {
+  const { store, calls } = mockStore(() => ({}));
+  const records = Array.from({ length: 1000 }, (_, i) => ({ id: `e${i}`, payload: 'P' }));
+  const n = await store.pushEntries(UID, records);
+  assert.equal(n, 1000);
+  const sent = calls.flatMap((c) => writesOf(c).map((d) => d.fields.id.stringValue));
+  assert.equal(sent.length, 1000);
+  assert.equal(new Set(sent).size, 1000);
+  assert.ok(calls.every((c) => writesOf(c).length <= 500));
+});
+
+test('pushEntries with nothing to send makes no request', async () => {
+  const { store, calls } = mockStore(() => ({}));
+  assert.equal(await store.pushEntries(UID, []), 0);
+  assert.equal(calls.length, 0);
+});
+
+test('entry writes land in the collection that entry queries read', async () => {
+  const { store, calls } = mockStore(() => []);
+  await store.pushEntries(UID, [{ id: 'abc', payload: 'P' }]);
+  await store.deleteEntry(UID, 'abc');
+  await store.pullEntriesDelta(UID, SYNC_EPOCH);
+  const [push, del, query] = calls;
+  const parent = query.path.replace(/:runQuery$/, '');
+  const { collectionId } = JSON.parse(query.init.body).structuredQuery.from[0];
+  const expected = `${parent}/${collectionId}/abc`;
+  assert.ok(writesOf(push)[0].name.endsWith(expected));
+  assert.equal(del.path, expected);
+  // Firestore document paths have an even number of segments.
+  assert.equal(expected.split('/').filter(Boolean).length % 2, 0);
+});
+
+test('runQuery delta maps documents to at-rest records and returns the last syncedAt as cursor', async () => {
+  const fields = toFsFields({ id: 'abc', domain: 'x.com', version: 3, isDeleted: false, updatedAt: '2026-02-01T00:00:00.000Z', displayOrder: 1, isPinned: false, folder: '', entryType: 'password', payload: 'P' });
+  fields.syncedAt = { timestampValue: '2030-01-01T00:00:05.250Z' };
+  const { store, calls } = mockStore(() => ([
+    { document: { name: `projects/${PID}/databases/(default)/documents/users/${UID}/entries/abc`, fields } },
     { done: true },
   ]));
-  const out = await store.pullEntriesDelta(UID, '2026-01-01T00:00:00.000Z');
-  assert.equal(out.length, 1);
-  assert.deepEqual(out[0], { id: 'abc', domain: 'x.com', version: 3, isDeleted: false, updatedAt: '2026-02-01T00:00:00.000Z', displayOrder: 1, isPinned: false, folder: '', entryType: 'password', payload: 'P' });
+  const { records, cursor } = await store.pullEntriesDelta(UID, '2030-01-01T00:00:00.000Z');
+  assert.deepEqual(records, [{ id: 'abc', domain: 'x.com', version: 3, isDeleted: false, updatedAt: '2026-02-01T00:00:00.000Z', displayOrder: 1, isPinned: false, folder: '', entryType: 'password', payload: 'P', syncedAt: '2030-01-01T00:00:05.250Z' }]);
+  assert.equal(cursor, '2030-01-01T00:00:05.250Z');
+  const q = JSON.parse(calls[0].init.body).structuredQuery;
+  assert.equal(q.where.fieldFilter.op, 'GREATER_THAN_OR_EQUAL');
+  assert.equal(q.where.fieldFilter.value.timestampValue, '2030-01-01T00:00:00.000Z');
+});
+
+test('pushEntries asks Firestore to stamp syncedAt with the server clock', async () => {
+  const { store, calls } = mockStore(() => ({}));
+  await store.pushEntries(UID, [{ id: 'a', payload: 'P' }]);
+  const [w] = JSON.parse(calls[0].init.body).writes;
+  assert.deepEqual(w.updateTransforms, [{ fieldPath: 'syncedAt', setToServerValue: 'REQUEST_TIME' }]);
 });
 
 test('404 with allowMissing yields null (fresh account)', async () => {
@@ -136,18 +186,129 @@ test('CloudSync.sync pushes modified + pulls delta + advances cursor', async () 
   const r = await ctl.sync(vault);
   assert.equal(r.pushed, 1);
   assert.equal(r.pulled, 1);
-  assert.ok(r.queued === 0);
   assert.ok(pushedBatches.length >= 1);
 });
 
-test('CloudSync queues on transport failure and reports queued', async () => {
+test('sync throws when the push fails, and the next sync re-sends the change', async () => {
   const vault = new MemVaultStub();
   vault.records = [{ id: 'a', version: 5, updatedAt: '2026-03-01T00:00:00.000Z' }];
-  const ctl = makeController(async (path) => {
-    if (path.startsWith('/users/') && !path.includes(':runQuery')) throw new Error('offline');
-    return [];
+  let offline = true;
+  const sent = [];
+  const ctl = makeController(async (path, init = {}) => {
+    if (path === ':commit') {
+      if (offline) throw new CloudError('offline', 'NETWORK');
+      sent.push(...JSON.parse(init.body).writes.map((w) => w.update.fields.id.stringValue));
+      return {};
+    }
+    return path.endsWith('/vault/meta') ? metaDoc('S') : [];
+  }, { cursor: '2026-02-01T00:00:00.000Z' });
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'S' });
+
+  await assert.rejects(ctl.sync(vault), (e) => e.code === 'NETWORK');
+  assert.equal(await ctl.getLastSyncAt(), '2026-02-01T00:00:00.000Z');
+
+  offline = false;
+  await ctl.sync(vault);
+  assert.deepEqual(sent, ['a']);
+});
+
+test('copies left in the old offline queue are dropped, never pushed', async () => {
+  const sent = [];
+  const ctl = makeController(async (path, init = {}) => {
+    if (path === ':commit') { sent.push(...JSON.parse(init.body).writes.map((w) => w.update.fields.id.stringValue)); return {}; }
+    return path.endsWith('/vault/meta') ? metaDoc('S') : [];
   });
-  const r = await ctl.sync(vault);
-  assert.equal(r.pushed, 0);
-  assert.equal(r.queued, 1);
+  await ctl.store.set({
+    [STORAGE_KEYS.VAULT_SALT]: 'S',
+    okey_offline_queue: [{ id: 'q1', records: [{ id: 'old', version: 1, updatedAt: '2026-01-01T00:00:00.000Z' }] }],
+  });
+  await ctl.sync(new MemVaultStub());
+  assert.deepEqual(sent, []);
+  assert.equal((await ctl.store.get('okey_offline_queue')).okey_offline_queue, undefined);
+});
+
+// legacy: an old account whose meta still holds a PIN wrap.
+function metaDoc(salt, { legacy = false } = {}) {
+  return { fields: toFsFields({ salt, kdfParamsRaw: '{}', wrappedRecovery: '', ...(legacy && { wrappedMaster: 'W' }) }) };
+}
+
+test('moveToCloud refuses to overwrite a different cloud vault', async () => {
+  const writes = [];
+  const ctl = makeController(async (path, init = {}) => {
+    if (init.method) { writes.push(path); return {}; }
+    return path.endsWith('/vault/meta') ? metaDoc('CLOUD-SALT') : [];
+  });
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'LOCAL-SALT' });
+  await assert.rejects(ctl.moveToCloud(new MemVaultStub()), (e) => e.code === 'VAULT_EXISTS');
+  assert.deepEqual(writes, []);
+});
+
+test('moveToCloud re-runs over its own cloud vault', async () => {
+  const writes = [];
+  const ctl = makeController(async (path, init = {}) => {
+    if (init.method) { writes.push(path); return {}; }
+    return path.endsWith('/vault/meta') ? metaDoc('SAME-SALT', { legacy: true }) : [];
+  });
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'SAME-SALT' });
+  await ctl.moveToCloud(new MemVaultStub());
+  assert.ok(writes.some((p) => p.endsWith('/vault/meta')));
+});
+
+test('sync pushes nothing when the cloud holds a different vault', async () => {
+  const writes = [];
+  const ctl = makeController(async (path, init = {}) => {
+    if (init.method === 'PATCH' || path === ':commit') { writes.push(path); return {}; }
+    return path.endsWith('/vault/meta') ? metaDoc('CLOUD-SALT') : [];
+  });
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'LOCAL-SALT' });
+  const vault = new MemVaultStub();
+  vault.records = [{ id: 'a', version: 1, updatedAt: '2026-03-01T00:00:00.000Z' }];
+  await assert.rejects(ctl.sync(vault), (e) => e.code === 'VAULT_EXISTS');
+  assert.deepEqual(writes, []);
+});
+
+test('a local reset to a new salt is checked again', async () => {
+  const ctl = makeController(async (path, init = {}) => {
+    if (init.method) return {};
+    return path.endsWith('/vault/meta') ? metaDoc('FIRST-SALT') : [];
+  });
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'FIRST-SALT' });
+  await ctl.sync(new MemVaultStub());
+  await ctl.store.set({ [STORAGE_KEYS.VAULT_SALT]: 'NEW-SALT' });
+  await assert.rejects(ctl.sync(new MemVaultStub()), (e) => e.code === 'VAULT_EXISTS');
+});
+
+test('pushMeta drops wrappedMaster even if a caller passes it', async () => {
+  const { store, calls } = mockStore(() => ({}));
+  await store.pushMeta(UID, { salt: 'S', kdfParams: {}, wrappedMaster: 'PIN-WRAP', wrappedRecovery: 'R' });
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal('wrappedMaster' in body.fields, false);
+  assert.equal(body.fields.wrappedRecovery.stringValue, 'R');
+});
+
+// ---- settings sync (F12) ----
+
+test('object settings travel as JSON text, never "[object Object]"', async () => {
+  const { store, calls } = mockStore(() => ({}));
+  await store.pushSettings(UID, { ...DEFAULT_SETTINGS, passwordGeneratorDefaults: { length: 24, symbols: false } });
+  const { fields } = JSON.parse(calls[0].init.body);
+  assert.equal(JSON.stringify(fields).includes('[object Object]'), false);
+  assert.deepEqual(JSON.parse(fields.passwordGeneratorDefaultsRaw.stringValue), { length: 24, symbols: false });
+});
+
+test('generator defaults survive a push, a pull and the settings gate', async () => {
+  const db = memoryFirestore();
+  const store = new CloudStore({ projectId: PID, getToken: async () => 't' });
+  store._request = db.request;
+  await store.pushSettings(UID, { ...DEFAULT_SETTINGS, passwordGeneratorDefaults: { ...DEFAULT_SETTINGS.passwordGeneratorDefaults, length: 24, symbols: false } });
+  const merged = mergeRemoteSettings(DEFAULT_SETTINGS, await store.pullSettings(UID));
+  assert.equal(merged.passwordGeneratorDefaults.length, 24);
+  assert.equal(merged.passwordGeneratorDefaults.symbols, false);
+});
+
+test('unreadable settings JSON from the cloud is ignored, not thrown', async () => {
+  const { store } = mockStore(() => ({ fields: toFsFields({ theme: 'light', passwordGeneratorDefaultsRaw: '{not json' }) }));
+  const out = await store.pullSettings(UID);
+  assert.equal(out.theme, 'light');
+  assert.equal('passwordGeneratorDefaults' in out, false);
 });

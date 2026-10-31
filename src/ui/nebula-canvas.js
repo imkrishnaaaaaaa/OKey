@@ -33,7 +33,9 @@ export function mountNebula(canvas) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   resize();
-  addEventListener('resize', resize);
+  // Resizing a canvas clears it. Under reduced motion nothing else would redraw it.
+  const onResize = () => { resize(); if (reduced) frame(performance.now()); };
+  addEventListener('resize', onResize);
 
   /* floating specks */
   const rnd = mulberry(20260823);
@@ -106,7 +108,7 @@ export function mountNebula(canvas) {
   return {
     destroy() {
       cancelAnimationFrame(raf);
-      removeEventListener('resize', resize);
+      removeEventListener('resize', onResize);
       removeEventListener('pointermove', onPointer);
     },
   };

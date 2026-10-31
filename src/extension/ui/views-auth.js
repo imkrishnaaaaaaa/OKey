@@ -4,20 +4,50 @@
  */
 
 import { STORAGE_KEYS, SECURITY } from '../../core/constants.js';
-import { firebaseReady, signInGoogle, signInEmail, signUpEmail } from '../../lib/firebase.js';
+import { firebaseReady, signInGoogle, signInEmail, signUpEmail, signOutUser, googleSignInReady, getCurrentUser } from '../../lib/firebase.js';
+import { isExtensionContext } from '../../lib/google-auth.js';
 import { h, clear, toast, buzz, pinInput, keyholeOrb } from '../../ui/kit.js';
+import { recoveryReveal } from '../../ui/recovery-ui.js';
+import { restoreFromBackup } from '../../core/backup-restore.js';
 import { I } from '../../ui/icons.js';
-import { setView, trySync, ctx } from '../../ui/app-core.js';
+import { setView, goHome, trySync, ctx, resetIdle } from '../../ui/app-core.js';
 import { cacheDek } from '../../ui/session-neutral.js';
 
 const local = () => ctx.store;
 
 /* ============================ WELCOME / AUTH ============================ */
+/**
+ * After sign-in: an account that already has a cloud vault restores it on this
+ * device. A new account creates one. Returns false (and tells the user) when the
+ * account cannot be checked, so we never offer "create" next to an unseen vault.
+ */
+async function routeAfterSignIn(orb) {
+  let next;
+  try {
+    next = (await ctx.cloudSync.hasCloudVault()) ? 'restore' : 'onboarding';
+  } catch {
+    toast("Couldn't check your account. Check your connection and try again.", 'error');
+    return false;
+  }
+  buzz([10, 30, 10]);
+  orb.success();
+  setTimeout(() => setView(next), 520);
+  return true;
+}
+
+/** Restore a vault from a backup file instead of making a new one. */
+function backupButton() {
+  return h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block ok-skip', style: { marginTop: '4px' }, text: 'Restore from a backup file',
+    onclick: () => setView('restore', { mode: 'backup', back: 'welcome' }) });
+}
+
 export function renderWelcome(c, root) {
   const orb = keyholeOrb({ size: 108 });
   orb.el.classList.add('nb-bloom');
   const card = h('div', {});
   let emailOpen = false;
+
+  function shake() { card.classList.remove('nb-shake'); void card.offsetWidth; card.classList.add('nb-shake'); setTimeout(() => card.classList.remove('nb-shake'), 450); }
 
   function buildCard() {
     clear(card);
@@ -27,6 +57,7 @@ export function renderWelcome(c, root) {
           'Cloud sync isn\'t configured yet — OKey runs fully offline and you can connect an account later in Settings.'),
         h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Create my vault',
           onclick: () => setView('onboarding') }),
+        backupButton(),
       );
       return;
     }
@@ -35,20 +66,22 @@ export function renderWelcome(c, root) {
       class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
       onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true;
+        // In the extension the sign-in runs in a new window and this popup closes. Say so first.
+        if (isExtensionContext()) toast('A Google window opened. Finish signing in there, then open OKey again.', 'info');
         try {
           await signInGoogle();
-          buzz([10, 30, 10]);
-          orb.success();
-          setTimeout(() => setView('onboarding'), 520);
-        } catch (e) { shakeErr(e.message); b.disabled = false; }
+          if (!(await routeAfterSignIn(orb))) b.disabled = false;
+        } catch (e) { toast(e.message, 'error'); shake(); b.disabled = false; }
       },
     },
       h('span', { html: I.google, style: { width: '18px', height: '18px', display: 'inline-flex' } }),
       'Continue with Google');
 
     if (!emailOpen) {
-      card.append(googleBtn,
-        h('button', { class: 'nb-btn nb-btn-glass nb-btn-block', style: { marginTop: '10px' }, text: 'Continue with email',
+      // No Google button where it cannot work (the extension, until its client id is set).
+      const google = googleSignInReady();
+      card.append(...(google ? [googleBtn] : []),
+        h('button', { class: 'nb-btn nb-btn-block ' + (google ? 'nb-btn-glass' : 'nb-btn-primary nb-breathe'), style: { marginTop: google ? '10px' : '0' }, text: 'Continue with email',
           onclick: () => { emailOpen = true; buildCard(); } }));
     } else {
       const email = h('input', { class: 'nb-input', type: 'email', placeholder: 'you@example.com', autocomplete: 'email' });
@@ -65,14 +98,10 @@ export function renderWelcome(c, root) {
           try {
             creating ? await signUpEmail(email.value.trim(), pass.value)
                      : await signInEmail(email.value.trim(), pass.value);
-            buzz([10, 30, 10]);
-            orb.success();
-            setTimeout(() => setView('onboarding'), 520);
+            if (!(await routeAfterSignIn(orb))) submitBtn.disabled = false;
           } catch (e) { errEl.textContent = e.message; shake(); submitBtn.disabled = false; }
         },
       });
-      function shake() { card.classList.remove('nb-shake'); void card.offsetWidth; card.classList.add('nb-shake'); setTimeout(() => card.classList.remove('nb-shake'), 450); }
-      function shakeErr(msg) { errEl.textContent = msg; shake(); }
       card.append(email, pass, errEl, submitBtn,
         h('div', { class: 'nb-row', style: { justifyContent: 'center', marginTop: '12px', gap: '4px' } },
           h('span', { class: 'nb-dim', style: { fontSize: 'var(--nb-fs-xs)' }, text: creating ? 'Have an account?' : 'New here?' }),
@@ -84,7 +113,7 @@ export function renderWelcome(c, root) {
     }
 
     card.append(h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block ok-skip', style: { marginTop: '16px' }, text: 'Use OKey offline for now',
-      onclick: () => setView('onboarding') }));
+      onclick: () => setView('onboarding') }), backupButton());
   }
 
   root.append(h('div', { class: 'ok-fullscreen' },
@@ -95,12 +124,86 @@ export function renderWelcome(c, root) {
     card,
   ));
   buildCard();
+  // Already signed in (for example the extension finished a Google sign-in while this
+  // popup was closed): carry on to restore or onboarding instead of asking again.
+  if (firebaseReady()) getCurrentUser().then((u) => { if (u) routeAfterSignIn(orb); }).catch(() => {});
+}
+
+/* ============================ RESTORE (new device) ============================ */
+/**
+ * Open a vault on this device with the 24 words and a new PIN.
+ * Default: the signed-in account's cloud vault. `{ mode: 'backup' }`: a backup file
+ * instead (`back` says which screen the Back button returns to).
+ */
+export function renderRestore(c, root, opts = {}) {
+  const fromFile = opts.mode === 'backup';
+  const orb = keyholeOrb({ size: 78 });
+  const file = fromFile ? h('input', { type: 'file', accept: '.json,application/json', class: 'nb-input', 'aria-label': 'Backup file' }) : null;
+  const words = h('textarea', {
+    class: 'nb-textarea', rows: 4, spellcheck: 'false', autocomplete: 'off',
+    placeholder: 'Type or paste your 24 recovery words',
+  });
+  const pin = pinInput({ autoFocus: false, onChange: (n) => orb.fill(n) });
+  const confirmPin = pinInput({ autoFocus: false, onSubmit: () => go() });
+  const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Restore my vault', onclick: () => go() });
+  let busy = false;
+
+  async function go() {
+    if (busy) return;
+    if (fromFile && !file.files?.[0]) return toast('Choose your backup file first', 'error');
+    if (!words.value.trim()) return toast('Enter your 24 recovery words', 'error');
+    if (pin.value.length !== 4) return toast('Choose a 4-digit PIN', 'error');
+    if (confirmPin.value !== pin.value) {
+      toast('PINs do not match', 'error'); confirmPin.shake(); confirmPin.reset(); return;
+    }
+    busy = true; btn.disabled = true; btn.textContent = 'Restoring…';
+    try {
+      if (fromFile) await restoreFromBackup(ctx.vault, await file.files[0].text(), words.value, pin.value);
+      else await ctx.cloudSync.restoreFromCloud(ctx.vault, words.value, pin.value);
+      await cacheDek(ctx.vault.exportDek(), ctx.settings.autoLockTimeout);
+      resetIdle();
+      buzz([10, 30, 10]);
+      orb.success();
+      toast('Vault restored', 'success');
+      setTimeout(() => { setView('list'); trySync().catch(() => {}); }, 650);
+    } catch (e) {
+      busy = false; btn.disabled = false; btn.textContent = 'Restore my vault';
+      orb.fail();
+      toast(e.code === 'DECRYPTION_FAILED'
+        ? (fromFile ? "Those words don't open this backup. Check them and try again." : "Those words don't open this account's vault. Check them and try again.")
+        : e.message || 'Restore failed', 'error');
+    }
+  }
+
+  root.append(h('div', { class: 'ok-fullscreen' },
+    h('div', { class: 'nb-col', style: { alignItems: 'center', marginTop: '5vh' } },
+      orb.el,
+      h('h2', { class: 'text-hero', style: { fontSize: 'var(--nb-fs-2xl)', margin: '18px 0 8px' }, text: fromFile ? 'Restore from a backup' : 'Welcome back' }),
+      h('p', { class: 'nb-muted', style: { textAlign: 'center', fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '0 0 18px', maxWidth: '320px' },
+        text: fromFile
+          ? 'Choose your OKey backup file, enter the 24 recovery words it was made with, then choose a PIN for this device.'
+          : 'This account already has a vault. Enter your 24 recovery words to open it here, then choose a PIN for this device.' })),
+    ...(fromFile ? [h('div', { class: 'nb-label', text: 'Backup file' }), file, h('div', { style: { height: '14px' } })] : []),
+    h('div', { class: 'nb-label', text: 'Recovery words' }),
+    words,
+    h('div', { class: 'nb-label', style: { marginTop: '16px' }, text: 'New PIN for this device' }),
+    pin.el,
+    h('div', { class: 'nb-label', style: { marginTop: '16px' }, text: 'Confirm PIN' }),
+    confirmPin.el,
+    h('div', { style: { height: '18px' } }),
+    btn,
+    fromFile
+      ? h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block', style: { marginTop: '10px' }, text: 'Back',
+        onclick: () => setView(opts.back || 'welcome') })
+      : h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block', style: { marginTop: '10px' }, text: 'Use a different account',
+        onclick: async () => { await signOutUser(); setView('welcome'); } }),
+  ));
 }
 
 /* ============================ ONBOARDING WIZARD ============================ */
 const TOUR = [
   { art: I.shield, h: 'Vault-grade encryption', p: 'Every secret is sealed with AES-256-GCM under a key derived from your PIN with Argon2id. Not even your cloud provider can read them.' },
-  { art: I.cloud, h: 'Synced, invisibly', p: 'Changes travel to your private encrypted space the moment you make them — and appear on every device signed into the same account.' },
+  { art: I.cloud, h: 'Synced, invisibly', p: 'Changes travel to your private encrypted space the moment you make them. On a new device, sign in and enter your 24-word recovery key.' },
   { art: I.wand, h: 'Built for flow', p: 'One tap copies passwords and live 2FA codes. Autofill badges appear only where they matter. Auto-lock has your back.' },
 ];
 
@@ -119,12 +222,13 @@ export function renderOnboarding(c, root) {
 
   /* steps 0+1: PIN create / confirm — orb ring fills digit by digit */
   let firstPin = '';
+  let mnemonic = ''; // the recovery words from setup(), shown once on step 2
 
   function pinStep(isCreate) {
     const orb = keyholeOrb({ size: 78 });
     const pin = pinInput({
       autoFocus: true,
-      onChange: (n) => orb.fill(n),
+      onChange: (n) => { orb.fill(n); cta.disabled = n !== 4; },
       onSubmit,
     });
     const cta = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
@@ -138,15 +242,20 @@ export function renderOnboarding(c, root) {
       done();
     }
 
+    // The 4th digit submits on its own, and so does Enter. Without this a fast
+    // typist creates the vault twice (two keys, two sets of recovery words).
+    let creating = false;
     async function done() {
+      if (creating) return;
+      creating = true;
       cta.disabled = true; cta.textContent = 'Sealing…';
       try {
-        await ctx.vault.setup(firstPin);
+        ({ recoveryMnemonic: mnemonic } = await ctx.vault.setup(firstPin));
         buzz([10, 30, 10]);
         await cacheDek(ctx.vault.exportDek(), ctx.settings.autoLockTimeout);
         orb.success();
         setTimeout(() => go(2), 700);
-      } catch (e) { toast(e.message || 'Setup failed', 'error'); orb.fail(); cta.disabled = false; cta.textContent = 'Create vault'; }
+      } catch (e) { toast(e.message || 'Setup failed', 'error'); orb.fail(); creating = false; cta.disabled = false; cta.textContent = 'Create vault'; }
     }
 
     stage.append(
@@ -162,40 +271,22 @@ export function renderOnboarding(c, root) {
       cta);
   }
 
-  /* step 2: recovery key reveal */
+  /* step 2: recovery key reveal. "Continue" turns on only after 3 of the words are typed back. */
   function recovery() {
-    finishReveal();
-    async function finishReveal() {
-      // vault.setup already created a mnemonic; pull it from storage? It was
-      // returned by setup() but not stored here — regenerate for display.
-      const { recoveryMnemonic } = await ctx.vault.regenerateRecovery().catch(() => ({ recoveryMnemonic: '' }));
-      paint(recoveryMnemonic);
-    }
-    function paint(mnemonic) {
-      const words = mnemonic.split(' ');
-      const grid = h('div', { class: 'ok-recovery-grid nb-stagger' },
-        ...words.map((w2, i) => h('div', { class: 'ok-word' }, h('b', { text: String(i + 1) }), w2)));
-      const ack = h('input', { type: 'checkbox', class: 'nb-checkbox' });
-      ack.addEventListener('change', () => { cont.disabled = !ack.checked; });
-      const cont = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', disabled: true, text: "I saved it — Continue",
-        onclick: () => go(3) });
-
-      stage.append(
-        h('div', { style: { marginTop: '7vh' } },
-          h('h2', { class: 'text-hero', style: { fontSize: 'var(--nb-fs-2xl)', textAlign: 'center', margin: '0 0 8px' }, text: 'Your recovery key' }),
-          h('p', { class: 'nb-muted', style: { textAlign: 'center', fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '0 0 14px' },
-            text: 'The ONLY way back in if you forget your PIN. Write these 24 words down, offline.' })),
-        grid,
-        h('div', { class: 'nb-row', style: { gap: '10px', marginBottom: '14px' } },
-          h('button', { class: 'nb-btn nb-btn-glass nb-spacer', onclick: () => copyWords(mnemonic) },
-            h('span', { html: I.copy, style: { width: '15px', height: '15px', display: 'inline-flex' } }), 'Copy'),
-          h('button', { class: 'nb-btn nb-btn-glass nb-spacer', onclick: () => downloadWords(mnemonic) },
-            h('span', { html: I.exportIcon, style: { width: '15px', height: '15px', display: 'inline-flex' } }), 'Save file')),
-        h('label', { class: 'nb-row', style: { gap: '10px', marginBottom: '16px', cursor: 'pointer' } }, ack,
-          h('span', { style: { fontSize: 'var(--nb-fs-sm)' }, text: "It's safe — I wrote it down" })),
-        cont,
-      );
-    }
+    const { el } = recoveryReveal(mnemonic, {
+      confirmLabel: 'I saved it. Continue',
+      onConfirmed: async () => {
+        await local().set({ [STORAGE_KEYS.LAST_RECOVERY_CHECK_AT]: new Date().toISOString() });
+        go(3);
+      },
+    });
+    stage.append(
+      h('div', { style: { marginTop: '7vh' } },
+        h('h2', { class: 'text-hero', style: { fontSize: 'var(--nb-fs-2xl)', textAlign: 'center', margin: '0 0 8px' }, text: 'Your recovery key' }),
+        h('p', { class: 'nb-muted', style: { textAlign: 'center', fontSize: 'var(--nb-fs-sm)', lineHeight: '1.6', margin: '0 0 14px' },
+          text: 'You need these 24 words if you forget your PIN, and to set up OKey on a new device. Without them a lost device means a lost vault. Write them down, offline.' })),
+      el,
+    );
   }
 
   /* step 3: feature tour */
@@ -223,33 +314,20 @@ export function renderOnboarding(c, root) {
     async function finish() {
       if (ctx.user && ctx.cloudSync) {
         try { await ctx.cloudSync.moveToCloud(ctx.vault); toast('Vault synced to your account', 'success'); }
-        catch { toast('Cloud sync will retry automatically', 'info'); }
+        catch (e) {
+          if (e.code === 'VAULT_EXISTS') toast(e.message, 'error');
+          else toast('Cloud sync will retry automatically', 'info');
+        }
       }
-      resetIdleSoon();
+      resetIdle();
       setView('list');
       trySync().catch(() => {});
     }
   }
 
-  function resetIdleSoon() { document.dispatchEvent(new Event('pointerdown')); }
-}
-
-function copyWords(mnemonic) {
-  navigator.clipboard.writeText(mnemonic)
-    .then(() => toast('Recovery key copied', 'success'))
-    .catch(() => toast('Copy failed', 'error'));
-}
-function downloadWords(mnemonic) {
-  const blob = new Blob([mnemonic], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = h('a', { href: url, download: 'okey-recovery-key.txt' });
-  document.body.append(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* ============================ LOCK ============================ */
-function lockState() { return { count: 0, until: 0 }; }
-
 export async function loadLockout() {
   const s = await local().get([STORAGE_KEYS.PIN_UI_FAILURES, STORAGE_KEYS.PIN_LOCKED_UNTIL]);
   return {
@@ -283,13 +361,24 @@ export function renderLock(c, root) {
   const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Unlock', onclick: () => go() });
   const err = h('div', { style: { color: 'var(--nb-danger)', minHeight: '20px', fontSize: 'var(--nb-fs-sm)', textAlign: 'center' } });
 
+  // One attempt at a time: Enter right after the 4th digit is not a second try.
+  // After a success it stays busy, because the screen is about to change.
+  let busy = false;
   async function go() {
+    if (busy) return;
+    busy = true;
+    let ok = false;
+    try { ok = await attempt(); } finally { busy = ok; }
+  }
+
+  /** @returns {Promise<boolean>} true when the vault unlocked */
+  async function attempt() {
     const st = await state;
     if (Date.now() < st.until) {
       err.textContent = 'Too many attempts — wait ' + Math.ceil((st.until - Date.now()) / 1000) + 's';
-      return;
+      return false;
     }
-    if (pin.value.length < 4) return;
+    if (pin.value.length < 4) return false;
     btn.disabled = true; btn.textContent = 'Unlocking…'; err.textContent = '';
     try {
       await ctx.vault.unlock(pin.value);
@@ -299,7 +388,9 @@ export function renderLock(c, root) {
       orb.success();
       root.querySelector('.ok-fullscreen')?.classList.add('nb-flare');
       await cacheDek(ctx.vault.exportDek(), ctx.settings.autoLockTimeout);
-      setTimeout(() => { setView('list'); trySync().catch(() => {}); }, 650);
+      resetIdle();
+      setTimeout(() => { goHome(); trySync().catch(() => {}); }, 650);
+      return true;
     } catch (e) {
       buzz(60);
       orb.fail();
@@ -312,6 +403,7 @@ export function renderLock(c, root) {
       }
       btn.disabled = false; btn.textContent = 'Unlock';
       pin.reset();
+      return false;
     }
   }
 
@@ -341,8 +433,10 @@ function renderRecover(c, root) {
     try {
       await ctx.vault.recoverWithMnemonic(ta.value);
       await ctx.vault.changeMasterPassword(np.value);
+      await clearFailures(); // the screen's own wait timer, separate from the vault's counter
       buzz([10, 30, 10]);
       await cacheDek(ctx.vault.exportDek(), ctx.settings.autoLockTimeout);
+      resetIdle();
       toast('Vault recovered', 'success');
       setView('list');
     } catch (e) {

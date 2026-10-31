@@ -15,6 +15,7 @@ import { cp, mkdir, rm, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hashTree } from './build-id.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -45,6 +46,7 @@ async function buildExtension() {
     entryPoints: {
       'background/service-worker': 'src/extension/background/service-worker.js',
       'popup/popup': 'src/extension/popup/popup.js',
+      'offscreen/offscreen': 'src/extension/offscreen/offscreen.js',
     },
     outdir: out,
     splitting: false,
@@ -66,6 +68,7 @@ async function buildExtension() {
   await copyTree('src/extension/icons', path.join(out, 'icons'));
   await copyTree('src/extension/popup/popup.html', path.join(out, 'popup/popup.html'));
   await copyTree('src/extension/popup/popup.css', path.join(out, 'popup/popup.css'));
+  await copyTree('src/extension/offscreen/offscreen.html', path.join(out, 'offscreen/offscreen.html'));
   await copyTree('src/extension/unlock/unlock.html', path.join(out, 'unlock/unlock.html'));
   await copyTree('src/extension/unlock/unlock.js', path.join(out, 'unlock/unlock.js'));
   await copyTree('src/extension/content/content.css', path.join(out, 'content/content.css'));
@@ -93,16 +96,7 @@ async function buildPwa() {
     entryPoints: { app: 'src/pwa/app.js' },
     outdir: out,
   });
-  // Service worker as classic script for broad compatibility.
-  const swCtx = await esbuild.context({
-    ...shared,
-    format: 'iife',
-    entryPoints: { sw: 'src/pwa/sw.js' },
-    outdir: out,
-  });
-
   await appCtx.rebuild();
-  await swCtx.rebuild();
 
   await copyTree('src/pwa/index.html', path.join(out, 'index.html'));
   await copyTree('src/pwa/app.css', path.join(out, 'app.css'));
@@ -110,6 +104,19 @@ async function buildPwa() {
   await copyTree('src/pwa/icons', path.join(out, 'icons'));
   await copyTree('src/pwa/fonts', path.join(out, 'fonts'));
   await copyTree('styles', path.join(out, 'styles'));
+
+  // The service worker is built last: its cache name carries a hash of everything
+  // else, so any change to the app makes installed copies fetch the new files.
+  const buildId = await hashTree(out);
+  const swCtx = await esbuild.context({
+    ...shared,
+    format: 'iife', // classic script for broad compatibility
+    entryPoints: { sw: 'src/pwa/sw.js' },
+    outdir: out,
+    define: { ...shared.define, __BUILD_ID__: JSON.stringify(buildId) },
+  });
+  await swCtx.rebuild();
+  console.log(`[build] pwa build id ${buildId}`);
 
   if (watch) {
     await appCtx.watch();

@@ -55,7 +55,7 @@ export function renderWelcome(c, root) {
       card.append(
         h('div', { class: 'ok-warn-box', html: I.warn.replace('<svg ', '<svg width="14" height="14" style="vertical-align:-2px;margin-right:6px" ') + '' },
           'Cloud sync isn\'t configured yet — OKey runs fully offline and you can connect an account later in Settings.'),
-        h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Create my vault',
+        h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', text: 'Create my vault',
           onclick: () => setView('onboarding') }),
         backupButton(),
       );
@@ -63,7 +63,7 @@ export function renderWelcome(c, root) {
     }
 
     const googleBtn = h('button', {
-      class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
+      class: 'nb-btn nb-btn-primary nb-btn-block',
       onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true;
         // In the extension the sign-in runs in a new window and this popup closes. Say so first.
@@ -81,7 +81,7 @@ export function renderWelcome(c, root) {
       // No Google button where it cannot work (the extension, until its client id is set).
       const google = googleSignInReady();
       card.append(...(google ? [googleBtn] : []),
-        h('button', { class: 'nb-btn nb-btn-block ' + (google ? 'nb-btn-glass' : 'nb-btn-primary nb-breathe'), style: { marginTop: google ? '10px' : '0' }, text: 'Continue with email',
+        h('button', { class: 'nb-btn nb-btn-block ' + (google ? 'nb-btn-glass' : 'nb-btn-primary'), style: { marginTop: google ? '10px' : '0' }, text: 'Continue with email',
           onclick: () => { emailOpen = true; buildCard(); } }));
     } else {
       const email = h('input', { class: 'nb-input', type: 'email', placeholder: 'you@example.com', autocomplete: 'email' });
@@ -89,7 +89,7 @@ export function renderWelcome(c, root) {
       const errEl = h('div', { class: 'nb-dim', style: { color: 'var(--nb-danger)', minHeight: '18px', fontSize: 'var(--nb-fs-xs)', margin: '8px 0 2px', textAlign: 'center' } });
       let creating = false;
       const submitBtn = h('button', {
-        class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
+        class: 'nb-btn nb-btn-primary nb-btn-block',
         text: 'Sign in',
         onclick: async () => {
           errEl.textContent = '';
@@ -145,7 +145,7 @@ export function renderRestore(c, root, opts = {}) {
   });
   const pin = pinInput({ autoFocus: false, onChange: (n) => orb.fill(n) });
   const confirmPin = pinInput({ autoFocus: false, onSubmit: () => go() });
-  const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Restore my vault', onclick: () => go() });
+  const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', text: 'Restore my vault', onclick: () => go() });
   let busy = false;
 
   async function go() {
@@ -231,7 +231,7 @@ export function renderOnboarding(c, root) {
       onChange: (n) => { orb.fill(n); cta.disabled = n !== 4; },
       onSubmit,
     });
-    const cta = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
+    const cta = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block',
       text: isCreate ? 'Continue' : 'Create vault', disabled: true,
       onclick: () => { if (pin.value.length === 4) onSubmit(); } });
 
@@ -304,7 +304,7 @@ export function renderOnboarding(c, root) {
       h('p', { class: 'ok-tour-p', text: slide.p }),
       ),
       dots,
-      h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
+      h('button', { class: 'nb-btn nb-btn-primary nb-btn-block',
         text: i < TOUR.length - 1 ? 'Next' : "Let's go",
         onclick: () => (i < TOUR.length - 1 ? tour(i + 1) : finish()) }),
       h('button', { class: 'nb-btn nb-btn-ghost nb-btn-block', style: { marginTop: '8px' }, text: 'Skip',
@@ -358,7 +358,7 @@ export function renderLock(c, root) {
 
   const orb = keyholeOrb({ size: 92 });
   const pin = pinInput({ autoFocus: true, onChange: (n) => orb.fill(n), onSubmit: () => go() });
-  const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe', text: 'Unlock', onclick: () => go() });
+  const btn = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block', text: 'Unlock', onclick: () => go() });
   const err = h('div', { style: { color: 'var(--nb-danger)', minHeight: '20px', fontSize: 'var(--nb-fs-sm)', textAlign: 'center' } });
 
   // One attempt at a time: Enter right after the 4th digit is not a second try.

@@ -145,6 +145,11 @@ function renderSplit(app, name, args, fn) {
     app.append(el);
     split = { el, left, right };
     renderVaultList(ctx, left);
+    // The footer belongs to the window, not the list column.
+    const footer = left.find
+      ? left.find((n) => n.classList?.contains('ok-footer'))
+      : left.querySelector('.ok-footer');
+    if (footer) app.append(footer);
   } else {
     refreshVaultList(); // marks the selected row and picks up edits
   }
@@ -212,13 +217,13 @@ export function shell({ active = '', title = null, back = null, actions = [] } =
   const footer = h('footer', { class: 'ok-footer' },
     dot,
     h('button', {
-      class: 'nb-btn-ghost nb-icon-btn', style: { width: '26px', height: '26px' },
+      class: 'nb-btn-ghost nb-icon-btn', style: { width: '44px', height: '44px' },
       'aria-label': 'Sync now', html: I.refresh,
       onclick: (ev) => { ev.currentTarget.classList.add('nb-spin'); trySync('manual').finally(() => ev.currentTarget.classList.remove('nb-spin')); },
     }),
     h('span', { class: 'sync-label', text: syncLabel() }),
     h('div', { class: 'nb-spacer' }),
-    h('button', { class: 'nb-icon-btn', style: { width: '28px', height: '28px' }, 'aria-label': 'Lock vault', html: I.lock,
+    h('button', { class: 'nb-icon-btn', style: { width: '44px', height: '44px' }, 'aria-label': 'Lock vault', html: I.lock,
       onclick: () => lockNow() }),
   );
   syncDot = dot;

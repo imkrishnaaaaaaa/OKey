@@ -80,9 +80,13 @@ export function installFakeDom() {
   class El {
     constructor(tag) {
       this.tag = tag; this.nodeType = 1; this.children = []; this.parent = null;
-      this.handlers = {}; this.style = {}; this.attrs = {}; this.dataset = {}; this.className = ''; this.textContent = '';
+      this.handlers = {}; this.style = {}; this.attrs = {}; this.dataset = {}; this._className = ''; this.textContent = '';
       const set = new Set();
       this.classList = { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c), toggle: (c, on) => (on ?? !set.has(c) ? set.add(c) : set.delete(c)) };
+      Object.defineProperty(this, 'className', {
+        get() { return this._className; },
+        set(v) { this._className = v; set.clear(); v.split(/\s+/).forEach(c => c && set.add(c)); }
+      });
     }
     setAttribute(k, v) { this.attrs[k] = v; }
     addEventListener(t, f) { (this.handlers[t] ||= []).push(f); }

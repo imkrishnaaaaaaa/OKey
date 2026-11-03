@@ -4,9 +4,12 @@ import { installFakeDom } from './helpers.js';
 
 const dom = installFakeDom();
 const { renderWelcome } = await import('../src/extension/ui/views-auth.js');
+const { firebaseReady } = await import('../src/lib/firebase.js');
+const cloud = firebaseReady();
 const flush = () => new Promise((r) => setTimeout(r, 20));
 
-test('a failed Google sign-in shows a message and gives the button back', async () => {
+test('a failed Google sign-in shows a message and gives the button back', async (t) => {
+  if (!cloud) return t.skip('local Firebase config is placeholders');
   const root = dom.createElement('div');
   renderWelcome({}, root);
   const google = root.find((n) => n.tag === 'button' && n.children.some((c) => c.text === 'Continue with Google'));
@@ -81,7 +84,8 @@ test('one wrong PIN is one failed try, even if it is submitted twice', async () 
 
 const buttonWith = (root, text) => root.find((n) => n.tag === 'button' && (n.textContent === text || n.children.some((c) => c.text === text)));
 
-test('in the extension, with no Google client id set, the welcome screen hides Google and offers email', () => {
+test('in the extension, with no Google client id set, the welcome screen hides Google and offers email', (t) => {
+  if (!cloud) return t.skip('local Firebase config is placeholders');
   globalThis.chrome = { runtime: { id: 'x' }, identity: {} };
   try {
     const root = dom.createElement('div');
@@ -94,7 +98,8 @@ test('in the extension, with no Google client id set, the welcome screen hides G
   }
 });
 
-test('on the web the Google button is still there', () => {
+test('on the web the Google button is still there', (t) => {
+  if (!cloud) return t.skip('local Firebase config is placeholders');
   const root = dom.createElement('div');
   renderWelcome({}, root);
   assert.ok(buttonWith(root, 'Continue with Google'));

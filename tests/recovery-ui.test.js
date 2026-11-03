@@ -14,8 +14,9 @@ function setup() {
   const { el } = recoveryReveal(mnemonic, { positions, onConfirmed: () => { confirmed++; } });
   const boxes = el.findAll((n) => n.tag === 'input');
   const button = el.find((n) => n.tag === 'button' && n.attrs.type === 'submit');
+  const showBtn = el.find((n) => n.tag === 'button' && n.attrs.type === 'button' && n.textContent && n.textContent.includes('Show'));
   const type = (i, text) => { boxes[i].value = text; boxes[i].dispatch('input'); };
-  return { words, positions, boxes, button, type, confirmed: () => confirmed, el };
+  return { words, positions, boxes, button, showBtn, type, confirmed: () => confirmed, el };
 }
 
 test('it shows all 24 words and asks for exactly the three chosen ones', () => {
@@ -23,7 +24,48 @@ test('it shows all 24 words and asks for exactly the three chosen ones', () => {
   const text = JSON.stringify(el, (k, v) => (k === 'parent' || k === 'handlers' ? undefined : v));
   assert.equal(boxes.length, 3);
   for (const n of positions) assert.ok(text.includes(`Word ${n}`), `asks for word ${n}`);
-  assert.equal(el.findAll((n) => n.className === 'ok-word').length, 24);
+  const wordEls = el.findAll((n) => n.classList && n.classList.contains('ok-word'));
+  assert.equal(wordEls.length, 24);
+});
+
+test('words are blurred by default', () => {
+  const { el } = setup();
+  const wordEls = el.findAll((n) => n.classList && n.classList.contains('ok-word'));
+  for (const el of wordEls) {
+    assert.ok(el.classList.contains('blurred'), 'words should be blurred by default');
+  }
+});
+
+test('Show words button toggles blur', () => {
+  const { el, showBtn } = setup();
+  const wordEls = el.findAll((n) => n.classList && n.classList.contains('ok-word'));
+  // Initially blurred
+  assert.ok(wordEls[0].classList.contains('blurred'));
+  // Click Show words
+  showBtn.dispatch('click');
+  // Now visible
+  assert.ok(!wordEls[0].classList.contains('blurred'));
+  // Click Hide words
+  showBtn.dispatch('click');
+  // Blurred again
+  assert.ok(wordEls[0].classList.contains('blurred'));
+});
+
+test('Copy and Save buttons are disabled when blurred', () => {
+  const { el } = setup();
+  const copyBtn = el.find((n) => n.tag === 'button' && n.attrs['aria-label'] === 'Copy recovery words');
+  const saveBtn = el.find((n) => n.tag === 'button' && n.attrs['aria-label'] === 'Save recovery words');
+  assert.equal(copyBtn.disabled, true);
+  assert.equal(saveBtn.disabled, true);
+  // Show words
+  const showBtn = el.find((n) => n.tag === 'button' && n.attrs.type === 'button' && n.textContent && n.textContent.includes('Show'));
+  showBtn.dispatch('click');
+  assert.equal(copyBtn.disabled, false);
+  assert.equal(saveBtn.disabled, false);
+  // Hide words
+  showBtn.dispatch('click');
+  assert.equal(copyBtn.disabled, true);
+  assert.equal(saveBtn.disabled, true);
 });
 
 test('the confirm button is off until all three words are right', () => {

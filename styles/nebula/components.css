@@ -50,7 +50,7 @@ body {
     filter var(--dur-med);
 }
 .nb-btn:active:not(:disabled) { transform: scale(.96); }
-.nb-btn:disabled { opacity: .45; cursor: not-allowed; }
+.nb-btn:disabled { background: var(--surface-2); color: var(--text-dim); box-shadow: none; opacity: 1; cursor: not-allowed; }
 .nb-btn svg { width: 17px; height: 17px; }
 
 /* Primary — the purple pill */
@@ -198,7 +198,7 @@ body {
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
   border: 1px solid rgba(255, 255, 255, 0.8);
-  box-shadow: var(--shadow-3);
+  box-shadow: var(--shadow-2);
   padding: 6px;
   animation: nb-pop var(--dur-med) var(--spring);
 }
@@ -431,10 +431,10 @@ input[type='range'].nb-range::-moz-range-thumb {
 .nb-modal {
   width: 100%;
   max-width: 380px;
-  border-radius: var(--r-xl);
+  border-radius: var(--r-lg);
   background: var(--surface);
   border: none;
-  box-shadow: var(--shadow-3);
+  box-shadow: var(--shadow-2);
   padding: var(--sp-5);
   animation: nb-sheet-up var(--dur-view) var(--spring);
 }
@@ -442,7 +442,7 @@ input[type='range'].nb-range::-moz-range-thumb {
   .nb-overlay { align-items: flex-end; padding: 0; }
   .nb-modal {
     max-width: none;
-    border-radius: var(--r-xl) var(--r-xl) 0 0;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
     padding-bottom: calc(var(--sp-5) + env(safe-area-inset-bottom));
   }
 }

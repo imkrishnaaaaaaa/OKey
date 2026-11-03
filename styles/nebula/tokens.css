@@ -36,15 +36,15 @@
   --purple-200: #d6cfff;
   --purple-300: #b7abff;
   --purple-400: #9a8af7;
-  --purple-500: #8676f0;   /* hero */
-  --purple-600: #7b68ee;   /* brand / CTA */
-  --purple-700: #6a56e0;   /* pressed */
-  --purple-800: #5844c4;
+  --purple-500: #7c6ae8;   /* hero - deeper for contrast */
+  --purple-600: #6552d9;   /* brand / CTA - deeper violet for 4.5:1 contrast */
+  --purple-700: #5a48c8;   /* pressed */
+  --purple-800: #4d3db8;
 
   --accent: var(--purple-600);
   --accent-strong: var(--purple-700);
   --accent-soft: var(--purple-100);
-  --accent-glow: rgba(123, 104, 238, 0.25);
+  --accent-glow: rgba(101, 82, 217, 0.28);
 
   /* ---- Surfaces ---- */
   --bg: #f5f5f7;
@@ -54,15 +54,14 @@
 
   /* ---- Text ---- */
   --text: #1c1c1e;
-  --text-mut: #55555c;
-  --text-dim: #8a8a8e;
+  --text-mut: #4a4a54;
+  --text-dim: #6a6a70;
 
   /* ---- Lines & shadows (soft, diffuse — never harsh) ---- */
   --border: #e5e5ea;
   --hairline: #ececf1;
   --shadow-1: 0 1px 3px rgba(28, 28, 46, 0.05), 0 4px 14px rgba(28, 28, 46, 0.04);
   --shadow-2: 0 4px 12px rgba(28, 28, 46, 0.06), 0 14px 34px rgba(28, 28, 46, 0.07);
-  --shadow-3: 0 10px 26px rgba(28, 28, 46, 0.08), 0 30px 70px rgba(28, 28, 46, 0.10);
   --shadow-accent: 0 6px 20px rgba(123, 104, 238, 0.35);
 
   /* ---- Glass moments (frosted white over color) ---- */
@@ -80,7 +79,6 @@
   --r-sm: 12px;
   --r-md: 16px;
   --r-lg: 22px;
-  --r-xl: 28px;
   --r-pill: 999px;
 
   /* ---- Spacing ---- */
@@ -91,7 +89,7 @@
   --font-ui: 'Nunito', 'Inter', system-ui, -apple-system, sans-serif;
   --font-display: 'Nunito', 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px;
+  --fs-xs: 13px; --fs-sm: 14px; --fs-md: 15px; --fs-lg: 17px;
   --fs-xl: 21px; --fs-2xl: 26px; --fs-display: 33px; --fs-mega: 40px;
 
   /* ---- Motion ---- */
@@ -105,7 +103,7 @@
   --nb-cyan: var(--purple-600);
   --nb-violet: var(--purple-600);
   --nb-indigo: var(--purple-500);
-  --nb-grad-hero: linear-gradient(120deg, #8676f0, #a78bfa);
+  --nb-grad-hero: linear-gradient(120deg, #7c6ae8, #a78bfa);
   --nb-bg0: var(--bg);
   --nb-bg1: var(--bg-raised);
   --nb-bg2: var(--surface);
@@ -118,7 +116,7 @@
   --well-edge: transparent;
   --glow-cyan: var(--accent-glow);
   --glow-violet: var(--accent-glow);
-  --ring-glow: 0 0 0 3px rgba(123, 104, 238, 0.18);
+  --ring-glow: 0 0 0 3px rgba(101, 82, 217, 0.18);
   --scrim: rgba(28, 28, 46, 0.35);
   --aurora-opacity: 1;
   --vs-brand: var(--accent);

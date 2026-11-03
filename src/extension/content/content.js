@@ -14,14 +14,22 @@ import { isOtpFieldLike, isNewPasswordField } from './field-kinds.js';
 import { createFillGuard } from './fill-guard.js';
 import { latestOnly } from '../../ui/latest.js';
 import { generatePassword } from '../../core/password-generator.js';
-import { isValidTotpSecret } from '../../core/totp.js';
 import { MSG } from '../lib/messages.js';
+import { PICKER_MSG, createChannel, frameMessage, isExtensionOrigin, isPickerMessage } from '../lib/frame-protocol.js';
 
 const BADGE = 'okey-badge';
 const PANEL = 'okey-panel';
 const tracked = new WeakMap(); // el → reposition fn
 const repositionRegistry = new Set(); // all active reposition fns for global reposition
 let panelEl = null;
+let panelFrame = null;
+let panelChannel = '';
+let panelFrameOrigin = '';
+let panelBadge = null;
+let panelAnchor = null;
+let panelMessageHandler = null;
+let panelUnlockHandler = null;
+let panelReadyTimer = null;
 let settings = { autoSubmitEnabled: false, autoFillSingleMatch: false };
 let activeSessionCred = null;
 const guard = createFillGuard(); // fill each box once, submit once per session
@@ -51,7 +59,7 @@ async function triggerSingleMatchAutofill() {
   if (res && !res.locked && res.matches && res.matches.length === 1) {
     // Never silently fill an invisible field (revamp H8).
     if (isVisiblyFillable(anchorEl)) {
-      fillAndRememberCredential(anchorEl, res.matches[0], false);
+      fillAndRememberCredential(anchorEl, res.matches[0].id, false);
     }
   }
 }
@@ -349,269 +357,175 @@ const openPanel = latestOnly(async (isCurrent, anchorEl, badge) => {
     frame.addEventListener('load', () => {
       try { frame.contentWindow.focus(); } catch (e) {}
     });
-    const onUnlockMsg = (ev) => {
+    panelUnlockHandler = (ev) => {
       if (ev.source !== frame.contentWindow) return;
       if (ev.data?.type === 'okey-unlock-success') {
-        window.removeEventListener('message', onUnlockMsg);
         closePanel();
         openPanel(anchorEl, badge);
       }
     };
-    window.addEventListener('message', onUnlockMsg);
+    window.addEventListener('message', panelUnlockHandler);
     positionAndShow(badge);
     return;
   }
 
-  // ---- Unlocked: credential picker ----
-  // 1. Search bar container
-  const searchContainer = document.createElement('div');
-    searchContainer.className = 'okey-panel-search-container';
-    searchContainer.style.cssText = 'padding: 6px 10px; border-bottom: 1px solid var(--okey-border, #444); display: flex;';
-
-    const searchInput = document.createElement('input');
-    searchInput.type = 'text';
-    searchInput.placeholder = 'Search logins...';
-    searchInput.className = 'okey-panel-search-input';
-    searchInput.style.cssText = 'width: 100%; padding: 6px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--okey-border, #444); background: var(--okey-bg-elev-2, #222); color: var(--okey-text, #fff); box-sizing: border-box; outline: none; font-family: inherit; transition: border-color 0.15s ease;';
-
-    searchInput.addEventListener('focus', () => {
-      searchInput.style.borderColor = 'var(--okey-brand, #00e676)';
-    });
-    searchInput.addEventListener('blur', () => {
-      searchInput.style.borderColor = 'var(--okey-border, #444)';
-    });
-
-    searchContainer.appendChild(searchInput);
-    panelEl.appendChild(searchContainer);
-
-    // 2. List container
-    const listContainer = document.createElement('div');
-    listContainer.className = 'okey-panel-list';
-    listContainer.style.cssText = 'max-height: 180px; overflow-y: auto;';
-    panelEl.appendChild(listContainer);
-
-    const renderList = (query = '') => {
-      listContainer.innerHTML = '';
-      const q = query.toLowerCase().trim();
-
-      const matchedFiltered = res.matches.filter(c => {
-        const name = (c.siteName || '').toLowerCase();
-        const dom = (c.domain || '').toLowerCase();
-        const user = (c.username || '').toLowerCase();
-        return name.includes(q) || dom.includes(q) || user.includes(q);
-      });
-
-      const othersFiltered = res.others.filter(c => {
-        const name = (c.siteName || '').toLowerCase();
-        const dom = (c.domain || '').toLowerCase();
-        const user = (c.username || '').toLowerCase();
-        return name.includes(q) || dom.includes(q) || user.includes(q);
-      });
-
-      if (matchedFiltered.length) {
-        listContainer.appendChild(header(`For ${location.hostname.replace(/^www\./, '')}`));
-        matchedFiltered.forEach((c) => listContainer.appendChild(credRow(c, anchorEl, false)));
-      } else if (!q) {
-        listContainer.appendChild(header('No saved logins for this site'));
-      }
-
-      if (othersFiltered.length) {
-        listContainer.appendChild(header('Other logins'));
-        const displayOthers = q ? othersFiltered : othersFiltered.slice(0, 3);
-        displayOthers.forEach((c) => listContainer.appendChild(credRow(c, anchorEl, true)));
-      }
-    };
-
-    renderList('');
-    searchInput.addEventListener('input', () => renderList(searchInput.value));
-
-    // 3. Divider and Add Login option
-    const div = document.createElement('div');
-    div.className = 'okey-panel-divider';
-    panelEl.appendChild(div);
-
-    panelEl.appendChild(row('+ Add new login', 'Save credential for this site', () => {
-      closePanel();
-      openAddModal(anchorEl);
-    }));
-
-    if (isPasswordField(anchorEl)) {
-      panelEl.appendChild(row('⚡ Generate strong password', 'Create and copy a secure password', () => {
-        closePanel();
-        fillGenerated(anchorEl);
-      }));
-    }
-
-    setTimeout(() => searchInput.focus(), 50);
-
-  positionAndShow(badge);
+  mountPickerFrame(anchorEl, badge);
 });
 
+/**
+ * The picker and add form are an extension page in a cross-origin iframe.
+ * The page cannot read what the user types, and every message is tied to this
+ * frame by source, origin and a one-shot channel.
+ */
+function mountPickerFrame(anchorEl, badge) {
+  panelBadge = badge;
+  panelAnchor = anchorEl;
+  panelChannel = createChannel();
+  panelFrameOrigin = '';
+
+  panelEl.classList.add('okey-panel-picker');
+  const frame = document.createElement('iframe');
+  panelFrame = frame;
+  frame.className = 'okey-picker-frame';
+  frame.setAttribute('title', 'OKey logins');
+  frame.src = chrome.runtime.getURL('picker/picker.html') + '#' + panelChannel;
+  frame.style.height = `${pickerHeight(380)}px`;
+  frame.addEventListener('error', showPickerError);
+  panelReadyTimer = setTimeout(showPickerError, 2000);
+
+  panelMessageHandler = (ev) => {
+    if (ev.source !== frame.contentWindow) return;
+    if (!isPickerMessage(ev.data, panelChannel)) return;
+
+    if (!panelFrameOrigin) {
+      if (ev.data.type !== PICKER_MSG.READY || !isExtensionOrigin(ev.origin)) return;
+      clearTimeout(panelReadyTimer);
+      panelReadyTimer = null;
+      panelFrameOrigin = ev.origin;
+      sendPickerContext();
+      return;
+    }
+    if (ev.origin !== panelFrameOrigin) return;
+
+    switch (ev.data.type) {
+      case PICKER_MSG.PICK:
+        if (!validEntryId(ev.data.id)) return;
+        closePanel();
+        fillAndRememberCredential(anchorEl, ev.data.id, ev.data.picked === true);
+        break;
+      case PICKER_MSG.ADDED:
+        if (!validEntryId(ev.data.id)) return;
+        closePanel();
+        fillAndRememberCredential(anchorEl, ev.data.id, true);
+        break;
+      case PICKER_MSG.GENERATE:
+        if (!isPasswordField(anchorEl)) return;
+        closePanel();
+        fillGenerated(anchorEl);
+        break;
+      case PICKER_MSG.CLOSE:
+        closePanel();
+        break;
+      case PICKER_MSG.RESIZE:
+        frame.style.height = `${pickerHeight(ev.data.height)}px`;
+        positionPanel();
+        break;
+    }
+  };
+  window.addEventListener('message', panelMessageHandler);
+
+  panelEl.appendChild(frame);
+  positionAndShow(badge);
+}
+
+function pickerHeight(height) {
+  return Math.min(Math.max(180, Number(height) || 380), Math.max(180, window.innerHeight - 24));
+}
+
+function validEntryId(id) {
+  return typeof id === 'string' && id.length > 0 && id.length <= 200;
+}
+
+/** Iframe failed or went quiet: show an extension-owned message, never a page DOM fallback. */
+function showPickerError() {
+  clearTimeout(panelReadyTimer);
+  panelReadyTimer = null;
+  if (!panelEl) return;
+  if (panelMessageHandler) {
+    window.removeEventListener('message', panelMessageHandler);
+    panelMessageHandler = null;
+  }
+  panelFrame = null;
+  panelEl.replaceChildren(header('OKey could not open its secure panel. Reload the page and try again.'));
+  positionPanel();
+}
+
+function sendPickerContext() {
+  if (!panelFrame?.contentWindow || !panelFrameOrigin) return;
+  const msg = frameMessage(PICKER_MSG.CONTEXT, panelChannel, {
+    hostname: location.hostname.replace(/^www\./, ''),
+    title: document.title,
+    canGenerate: isPasswordField(panelAnchor),
+    theme: panelEl?.getAttribute('data-theme') || 'light',
+  });
+  panelFrame.contentWindow.postMessage(msg, panelFrameOrigin);
+}
+
 function onDocClick(e) { if (panelEl && !panelEl.contains(e.target)) closePanel(); }
-// Clean up panel
+
 function closePanel() {
+  clearTimeout(panelReadyTimer);
+  panelReadyTimer = null;
+  if (panelMessageHandler) {
+    window.removeEventListener('message', panelMessageHandler);
+    panelMessageHandler = null;
+  }
+  if (panelUnlockHandler) {
+    window.removeEventListener('message', panelUnlockHandler);
+    panelUnlockHandler = null;
+  }
   panelEl?.remove();
   panelEl = null;
+  panelFrame = null;
+  panelChannel = '';
+  panelFrameOrigin = '';
+  panelBadge = null;
+  panelAnchor = null;
   document.removeEventListener('click', onDocClick);
 }
 
-/** Anchor the panel under the badge and mount it. */
+/** Anchor the panel under the badge and keep it inside the window. */
 function positionAndShow(badge) {
   if (!panelEl) return;
-  const r = badge.getBoundingClientRect();
-  panelEl.style.left = `${Math.max(8, window.scrollX + r.right - 280)}px`;
-  panelEl.style.top = `${window.scrollY + r.bottom + 6}px`;
+  panelBadge = badge;
   document.body.appendChild(panelEl);
+  positionPanel();
   // Stays until closePanel. A one-time listener was used up by the first click
   // INSIDE the panel, after which a click outside no longer closed it.
   setTimeout(() => { if (panelEl) document.addEventListener('click', onDocClick); }, 0);
 }
 
-function escapeHtml(str) {
-  if (!str) return '';
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-function closeAddModal() {
-  const overlay = document.querySelector('.okey-overlay');
-  if (overlay) overlay.remove();
-}
-
-function openAddModal(anchorEl) {
-  closeAddModal();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'okey-overlay';
-
-  const modal = document.createElement('div');
-  modal.className = 'okey-modal';
-
-  const resolvedTheme = settings.theme === 'system'
-    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : settings.theme;
-  modal.setAttribute('data-theme', resolvedTheme || 'dark');
-
-  const titleVal = document.title.split('|')[0].split('-')[0].trim() || location.hostname;
-  const domainVal = location.hostname.replace(/^www\./, '');
-  const usernameVal = '';
-  const passwordVal = '';
-
-  modal.innerHTML = `
-    <h3 class="okey-modal-title">Add Login to OKey</h3>
-    
-    <div class="okey-modal-field">
-      <label class="okey-modal-label">Site Name</label>
-      <input type="text" class="okey-modal-input" id="okey-add-sitename" value="${escapeHtml(titleVal)}" placeholder="e.g. Google">
-    </div>
-    
-    <div class="okey-modal-field">
-      <label class="okey-modal-label">Domain</label>
-      <input type="text" class="okey-modal-input" id="okey-add-domain" value="${escapeHtml(domainVal)}" placeholder="e.g. google.com">
-    </div>
-    
-    <div class="okey-modal-field">
-      <label class="okey-modal-label">Username / Email</label>
-      <input type="text" class="okey-modal-input" id="okey-add-username" value="${escapeHtml(usernameVal)}" placeholder="Enter username or email" autocomplete="new-password">
-    </div>
-    
-    <div class="okey-modal-field">
-      <label class="okey-modal-label">Password</label>
-      <div class="okey-modal-input-group">
-        <input type="text" class="okey-modal-input" id="okey-add-password" value="${escapeHtml(passwordVal)}" placeholder="Password" autocomplete="new-password">
-        <button type="button" class="okey-modal-affix-btn" id="okey-add-gen">Generate</button>
-      </div>
-    </div>
-
-    <div class="okey-modal-field">
-      <label class="okey-modal-label">TOTP Secret <span style="font-weight:normal;opacity:0.6;">(optional)</span></label>
-      <input type="text" class="okey-modal-input" id="okey-add-totp" placeholder="Base32 secret">
-    </div>
-    
-    <div class="okey-modal-buttons">
-      <button type="button" class="okey-modal-btn okey-modal-btn-secondary" id="okey-add-cancel">Cancel</button>
-      <button type="button" class="okey-modal-btn okey-modal-btn-primary" id="okey-add-save">Save & Autofill</button>
-    </div>
-  `;
-
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) {
-      closeAddModal();
-    }
-  });
-
-  modal.querySelector('#okey-add-gen').addEventListener('click', (e) => {
-    if (!e.isTrusted) return;
-    const pwInput = modal.querySelector('#okey-add-password');
-    pwInput.value = generatePassword(settings.passwordGeneratorDefaults || { length: 20 });
-  });
-
-  modal.querySelector('#okey-add-cancel').addEventListener('click', () => {
-    closeAddModal();
-  });
-
-  modal.querySelector('#okey-add-save').addEventListener('click', async (e) => {
-    // A page script must not be able to fill this form and press Save to plant a login.
-    if (!e.isTrusted) return;
-    const siteName = modal.querySelector('#okey-add-sitename').value.trim();
-    const domain = modal.querySelector('#okey-add-domain').value.trim();
-    const username = modal.querySelector('#okey-add-username').value.trim();
-    const password = modal.querySelector('#okey-add-password').value;
-    const totpSecret = modal.querySelector('#okey-add-totp').value.replace(/\s+/g, '');
-
-    if (!siteName && !domain) {
-      alert('Please provide a Site Name or Domain.');
-      return;
-    }
-
-    if (totpSecret && !isValidTotpSecret(totpSecret)) {
-      alert('Invalid TOTP secret (must be base32).');
-      return;
-    }
-
-    const data = {
-      siteName,
-      domain: domain.toLowerCase(),
-      username,
-      password,
-      totpSecret,
-      entryType: 'password'
-    };
-
-    const res = await chrome.runtime.sendMessage({ type: MSG.ADD_CREDENTIAL, data }).catch(() => null);
-
-    if (res && res.success && res.entry) {
-      closeAddModal();
-      // The user just made this login by hand, so it is allowed even if its domain differs.
-      fillAndRememberCredential(anchorEl, res.entry, true);
-      toast('Saved & filled by OKey');
-    } else {
-      alert(res?.error || 'Failed to save credential. Please ensure OKey is unlocked.');
-    }
-  });
+function positionPanel() {
+  if (!panelEl || !panelBadge) return;
+  const r = panelBadge.getBoundingClientRect();
+  const width = panelEl.offsetWidth || 300;
+  const height = panelEl.offsetHeight || 0;
+  const vw = document.documentElement.clientWidth;
+  const vh = window.innerHeight;
+  const minLeft = window.scrollX + 8;
+  const maxLeft = window.scrollX + Math.max(8, vw - width - 8);
+  const left = Math.min(Math.max(window.scrollX + r.right - width, minLeft), maxLeft);
+  const minTop = window.scrollY + 8;
+  const maxTop = window.scrollY + Math.max(8, vh - height - 8);
+  const top = Math.min(Math.max(window.scrollY + r.bottom + 6, minTop), maxTop);
+  panelEl.style.left = `${left}px`;
+  panelEl.style.top = `${top}px`;
 }
 
 function header(text) {
   const d = document.createElement('div');
   d.className = 'okey-panel-header';
   d.textContent = text;
-  return d;
-}
-function row(title, sub, onclick) {
-  const d = document.createElement('div');
-  d.className = 'okey-panel-row';
-  d.innerHTML = `<div class="okey-panel-title"></div><div class="okey-panel-sub"></div>`;
-  d.querySelector('.okey-panel-title').textContent = title;
-  d.querySelector('.okey-panel-sub').textContent = sub || '';
-  // Rows fill, save or generate, so only a real click may trigger them.
-  if (onclick) d.addEventListener('click', (e) => { if (e.isTrusted) onclick(e); });
   return d;
 }
 /**
@@ -624,8 +538,8 @@ async function fetchSecret(id, picked) {
   return res?.success ? res.cred : null;
 }
 
-async function fillAndRememberCredential(anchorEl, summary, picked) {
-  const cred = await fetchSecret(summary.id, picked);
+async function fillAndRememberCredential(anchorEl, id, picked) {
+  const cred = await fetchSecret(id, picked);
   if (!cred) { toast('Could not fill. OKey may be locked.'); return; }
   guard.reset(); // the user picked a login: a new session
   activeSessionCred = cred;
@@ -634,13 +548,6 @@ async function fillAndRememberCredential(anchorEl, summary, picked) {
   fillCredential(anchorEl, cred);
   startAutofillPolling();
   submitOnce(anchorEl);
-}
-function credRow(cred, anchorEl, picked) {
-  const d = row(cred.siteName || cred.domain, cred.username || '(no username)', () => {
-    fillAndRememberCredential(anchorEl, cred, picked);
-    closePanel();
-  });
-  return d;
 }
 
 /** Fill the username, password and code boxes that belong to the clicked box. */
@@ -867,13 +774,6 @@ chrome.runtime.onMessage.addListener((m) => {
     const resolvedTheme = settings.theme === 'system'
       ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
       : settings.theme;
-      
-    if (panelEl) {
-      panelEl.setAttribute('data-theme', resolvedTheme);
-    }
-    const modal = document.querySelector('.okey-modal');
-    if (modal) {
-      modal.setAttribute('data-theme', resolvedTheme);
-    }
+    if (panelEl) panelEl.setAttribute('data-theme', resolvedTheme);
   }
 });

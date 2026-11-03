@@ -47,6 +47,7 @@ async function buildExtension() {
       'background/service-worker': 'src/extension/background/service-worker.js',
       'popup/popup': 'src/extension/popup/popup.js',
       'offscreen/offscreen': 'src/extension/offscreen/offscreen.js',
+      'picker/picker': 'src/extension/picker/picker.js',
     },
     outdir: out,
     splitting: false,
@@ -71,6 +72,8 @@ async function buildExtension() {
   await copyTree('src/extension/offscreen/offscreen.html', path.join(out, 'offscreen/offscreen.html'));
   await copyTree('src/extension/unlock/unlock.html', path.join(out, 'unlock/unlock.html'));
   await copyTree('src/extension/unlock/unlock.js', path.join(out, 'unlock/unlock.js'));
+  await copyTree('src/extension/picker/picker.html', path.join(out, 'picker/picker.html'));
+  await copyTree('src/extension/picker/picker.css', path.join(out, 'picker/picker.css'));
   await copyTree('src/extension/content/content.css', path.join(out, 'content/content.css'));
   await copyTree('styles', path.join(out, 'styles'));
   await copyTree('src/pwa/fonts', path.join(out, 'fonts'));

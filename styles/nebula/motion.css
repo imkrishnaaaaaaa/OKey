@@ -101,12 +101,11 @@
 }
 .nb-bloom { animation: nb-bloom .7s var(--spring) both; }
 
-/* ---- Breathing glow for primary hero elements ---- */
+/* ---- Breathing glow for the sync dot only ---- */
 @keyframes nb-breathe {
-  0%, 100% { box-shadow: 0 6px 18px rgba(123, 104, 238, 0.28); }
-  50% { box-shadow: 0 8px 30px rgba(123, 104, 238, 0.45); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(101, 82, 217, 0.18); }
+  50% { box-shadow: 0 0 0 6px rgba(101, 82, 217, 0.04); }
 }
-.nb-breathe { animation: nb-breathe 3.2s ease-in-out infinite; }
 
 /* ---- Spinning sync glyph ---- */
 .nb-spin { animation: nb-rotate .8s linear infinite; }

@@ -46,7 +46,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["unlock/unlock.html"],
+      "resources": ["unlock/unlock.html", "picker/picker.html"],
       "matches": ["http://*/*", "https://*/*"],
       "use_dynamic_url": true
     }

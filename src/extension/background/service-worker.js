@@ -23,7 +23,7 @@ import { createUnlockGate } from './unlock-gate.js';
 import { runBackgroundSync } from './background-sync.js';
 import { createClipboardCleaner } from './clipboard-clear.js';
 import { shouldLockOnIdleState } from '../lib/idle-policy.js';
-import { isExtensionPageSender } from '../lib/sender.js';
+import { isExtensionPageSender, isPickerFrameSender, senderPageUrl } from '../lib/sender.js';
 import { createCloudSync } from '../../lib/cloud-sync-factory.js';
 import { ChromeStorageAdapter } from '../lib/platform.js';
 import { getCachedDek, clearSession, isPopupOpen, hardenSession, touchPageSession, checkAndClearSessionIfExpired, cacheDek } from '../lib/session.js';
@@ -146,7 +146,13 @@ const CONTENT_ONLY_TYPES = new Set([
 ]);
 
 function isTrustedContentSender(sender) {
-  return sender?.id === chrome.runtime.id && typeof sender?.tab?.id === 'number';
+  if (sender?.id !== chrome.runtime.id || typeof sender?.tab?.id !== 'number') return false;
+  // A web page cannot send from our extension origin. Inside a tab the only
+  // extension page allowed to ask for site data is the picker frame.
+  if (isExtensionPageSender(sender, chrome.runtime.id)) {
+    return isPickerFrameSender(sender, chrome.runtime.id);
+  }
+  return true;
 }
 
 // ---- Settings ----
@@ -195,8 +201,12 @@ async function getCurrentSite() {
   }
 }
 
-/** The page that sent the message. Not the tab's URL, which can lag during a navigation. */
-const senderUrl = (sender) => sender.url || sender.origin || '';
+/**
+ * The page that sent the message. A content script's own URL is the page and is
+ * fresher than tab.url during navigation. The picker is an extension page, so
+ * its site has to come from the tab.
+ */
+const senderUrl = (sender) => senderPageUrl(sender, chrome.runtime.id);
 
 /**
  * Names only (no passwords, no codes) for the requesting page. The secret of one

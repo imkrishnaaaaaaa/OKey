@@ -120,9 +120,9 @@ export function renderVaultList(c, root) {
   if (unreadable) toast(`${unreadable} saved item${unreadable > 1 ? 's' : ''} could not be opened. Nothing was deleted.`, 'error');
   const { header, footer } = shell({
     actions: [
-      h('button', { class: 'nb-icon-btn', 'aria-label': 'Add login', html: I.plus,
+      h('button', { class: 'nb-icon-btn ok-add-btn', 'aria-label': 'Add login', html: I.plus,
         onclick: () => setView('edit') }),
-      h('button', { class: 'nb-icon-btn', 'aria-label': 'Password generator', html: I.wand,
+      h('button', { class: 'nb-icon-btn', 'aria-label': 'Password generator', html: I.sparkle,
         onclick: () => setView('generator') }),
       h('button', { class: 'nb-icon-btn', 'aria-label': 'Settings', html: I.gear,
         onclick: () => setView('settings') }),
@@ -308,7 +308,7 @@ function selectBar() {
 function emptyState(q) {
   if (q) return okEmpty(I.search, 'No matches', 'Nothing in your vault matches “' + q + '”.', null);
   if (currentTab === 'favorites') return okEmpty(I.star, 'No favorites yet', 'Star an item and it will wait here.', null);
-  return okEmpty(I.plus, 'Your vault is empty', 'Add your first login — it stays encrypted on this device until you connect an account.', { label: 'Add your first item', go: () => setView('edit', null) });
+  return okEmpty(I.plus, 'Your vault is empty', 'Add your first login. It stays encrypted on this device until you connect an account.', { label: 'Add your first item', go: () => setView('edit', null) });
 }
 function okEmpty(artIcon, title, sub, cta) {
   return h('div', { class: 'ok-empty' },
@@ -492,7 +492,7 @@ export function renderEdit(c, root, id) {
       h('button', { class: 'nb-btn nb-btn-ghost nb-btn-sm', text: '+ Add field', onclick: () => customWrap.append(customRow()) })),
   );
 
-  const save = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block nb-breathe',
+  const save = h('button', { class: 'nb-btn nb-btn-primary nb-btn-block',
     text: editing ? 'Save changes' : 'Add to vault',
     onclick: async () => {
       let folderVal = folderDd.value;

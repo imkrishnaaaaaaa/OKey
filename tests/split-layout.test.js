@@ -1,5 +1,6 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { installFakeDom, MemoryStorage } from './helpers.js';
 
 const dom = installFakeDom();
@@ -14,9 +15,10 @@ globalThis.history = { pushState(_s, _t, url) { pushes.push(url); globalThis.loc
 
 const { Vault } = await import('../src/core/vault.js');
 const { DEFAULT_SETTINGS } = await import('../src/core/constants.js');
-const { ctx, attachCore, setView, configureShell, goHome } = await import('../src/ui/app-core.js');
+const { ctx, attachCore, setView, configureShell, goHome, resetIdle } = await import('../src/ui/app-core.js');
 
 const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms));
+afterEach(() => resetIdle.cancel());
 const app = () => dom.getElementById('app');
 const searchBox = () => app().find((n) => n.tag === 'input' && n.attrs.placeholder?.startsWith('Search'));
 const cards = () => app().findAll((n) => n.className?.startsWith?.('ok-entry '));
@@ -42,6 +44,19 @@ test('on a wide window the list and a calm empty pane sit side by side', async (
   assert.ok(pane('list') && pane('main'), 'two panes');
   assert.ok(pane('list').find((n) => n.tag === 'input' && n.attrs.placeholder?.startsWith('Search')), 'search is in the list pane');
   assert.ok(JSON.stringify(pane('main'), (k, v) => (k === 'parent' || k === 'handlers' ? undefined : v)).includes('Select a login'));
+  assert.equal(app().children.filter((c) => c.className === 'ok-footer').length, 1, 'one footer');
+  assert.equal(pane('list').find((n) => n.className === 'ok-footer'), null, 'footer is not in the list pane');
+});
+
+test('the PWA shell fills the window at every breakpoint', () => {
+  const css = readFileSync(new URL('../src/pwa/app.css', import.meta.url), 'utf8');
+  assert.match(css, /height:\s*100dvh/, 'fills the phone window');
+  assert.match(css, /max-width:\s*560px/, 'tablet column grows');
+  assert.match(css, /max-width:\s*none/, 'desktop uses the whole window');
+
+  const screens = readFileSync(new URL('../styles/nebula/screens.css', import.meta.url), 'utf8');
+  assert.match(screens, /\.ok-group \{[^}]*width:\s*100%/, 'tablet cards fill the column');
+  assert.match(screens, /@media \(hover: none\)[\s\S]*?\.ok-entry-actions \{ display: flex; \}/, 'touch rows show quick copy');
 });
 
 test('opening an item changes only the right pane, so the search text stays', async () => {
